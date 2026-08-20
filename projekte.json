@@ -1,0 +1,36 @@
+{
+  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard",
+
+  "einstellungen": {
+    "wwwroot":   "C:\\inetpub\\wwwroot",
+    "mysqlBin":  "",
+    "mysqlPort": 3306
+  },
+
+  "projekte": [
+    {
+      "name":    "Renate",
+      "ordner":  "renate",
+      "docroot": "",
+      "port":    8081,
+      "sql": [
+        "sql/01-benutzer-und-datenbank.sql",
+        { "datei": "sql/02-tabellen.sql", "datenbank": "renate" }
+      ],
+      "setupUrl": "http://localhost:{port}/setup.php",
+      "konfigDateien": [ "config/config.php" ],
+      "icon": ""
+    },
+    {
+      "name":    "Olaf",
+      "ordner":  "olaf",
+      "docroot": "public",
+      "port":    8082,
+      "sql": [
+        "datenbank/create-user.sql",
+        "datenbank/schema.sql"
+      ],
+      "konfigDateien": [ ".env" ]
+    }
+  ]
+}
