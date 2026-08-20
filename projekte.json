@@ -1,5 +1,5 @@
 {
-  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard",
+  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard. konfigDateien: einfacher Pfad oder { datei, vorlage } - fehlt die Datei, wird sie bei der Installation aus der Vorlage kopiert; ohne Angabe werden <datei>.example, <datei>.dist und config.example.php-Muster automatisch gesucht.",
 
   "einstellungen": {
     "wwwroot":   "C:\\inetpub\\wwwroot",
@@ -30,7 +30,7 @@
         "datenbank/create-user.sql",
         "datenbank/schema.sql"
       ],
-      "konfigDateien": [ ".env" ]
+      "konfigDateien": [ { "datei": ".env", "vorlage": ".env.example" } ]
     }
   ]
 }

@@ -329,7 +329,7 @@ function Expand-ProjectText {
 
 $script:JsonTemplate = @'
 {
-  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard",
+  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard. konfigDateien: einfacher Pfad oder { datei, vorlage } - fehlt die Datei, wird sie bei der Installation aus der Vorlage kopiert; ohne Angabe werden <datei>.example, <datei>.dist und config.example.php-Muster automatisch gesucht.",
 
   "einstellungen": {
     "wwwroot":   "C:\\inetpub\\wwwroot",
@@ -360,7 +360,7 @@ $script:JsonTemplate = @'
         "datenbank/create-user.sql",
         "datenbank/schema.sql"
       ],
-      "konfigDateien": [ ".env" ]
+      "konfigDateien": [ { "datei": ".env", "vorlage": ".env.example" } ]
     }
   ]
 }
@@ -446,12 +446,19 @@ function Read-ProjectJson {
             $sql.Add(@{ Datei = $abs; Anzeige = $file; Datenbank = $db })
         }
 
-        $cfg = New-Object System.Collections.Generic.List[string]
+        # Konfig-Einträge: einfacher Pfad oder Objekt { datei, vorlage }.
+        # "vorlage" ist eine Beispieldatei (config.php.example), die kopiert
+        # wird, falls die eigentliche Datei noch fehlt.
+        $cfg = New-Object System.Collections.Generic.List[object]
         foreach ($c in @($p.konfigDateien)) {
-            if ([string]::IsNullOrWhiteSpace([string]$c)) { continue }
-            $c2 = [string]$c
-            if (-not [System.IO.Path]::IsPathRooted($c2)) { $c2 = Join-Path $dir $c2 }
-            $cfg.Add($c2)
+            if ($null -eq $c) { continue }
+            $file = $null; $tpl = $null
+            if ($c -is [string]) { $file = $c }
+            elseif ($c.datei)    { $file = [string]$c.datei; if ($c.vorlage) { $tpl = [string]$c.vorlage } }
+            if ([string]::IsNullOrWhiteSpace($file)) { $script:JsonErrors += "${where}: Ein Konfig-Eintrag hat kein Feld 'datei'."; continue }
+            if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $dir $file }
+            if ($tpl -and -not [System.IO.Path]::IsPathRooted($tpl)) { $tpl = Join-Path $dir $tpl }
+            $cfg.Add(@{ Datei = $file; Vorlage = $tpl })
         }
 
         # Icon aus Base64 (PNG/JPG/BMP); Fehler sind kein Abbruchgrund
@@ -512,6 +519,34 @@ function New-LetterIcon {
     return $bmp
 }
 
+<#
+ Sucht die Beispieldatei zu einer (noch fehlenden) Konfigurationsdatei.
+ Erst die explizite Angabe aus der JSON, dann die üblichen Muster:
+   config.php.example / config.php.dist   (angehängt)
+   config.example.php / config.dist.php   (vor der Endung)
+ Liefert den Pfad der ersten existierenden Vorlage oder $null.
+#>
+function Find-ConfigTemplate {
+    param([Parameter(Mandatory)][string]$Target, [string]$Explicit = $null)
+    if ($Explicit) {
+        if (Test-Path -LiteralPath $Explicit) { return $Explicit }
+        return $null
+    }
+    $cands = New-Object System.Collections.Generic.List[string]
+    foreach ($suffix in @('.example', '.dist', '.sample')) {
+        $cands.Add($Target + $suffix)
+        $ext  = [System.IO.Path]::GetExtension($Target)
+        if ($ext) {
+            $base = $Target.Substring(0, $Target.Length - $ext.Length)
+            $cands.Add($base + $suffix + $ext)     # config.example.php
+        }
+    }
+    foreach ($c in $cands) {
+        if (Test-Path -LiteralPath $c) { return $c }
+    }
+    return $null
+}
+
 # ==============================================================================
 #  4) IIS: Websites lesen und anlegen
 # ==============================================================================
@@ -562,8 +597,17 @@ function New-ProjectSite {
 
     $existing = @(Get-IisSites | Where-Object { $_.Name -eq $Project.Name })
     if ($existing.Count -gt 0) {
+        # Sonderfall "Erneut versuchen": Die Website stammt aus einem früheren
+        # Durchlauf mit demselben Port - dann weiterverwenden statt abbrechen.
+        if (-not $ReplaceExisting -and $existing[0].Bindings -like "*:$($Project.Port):*") {
+            Write-Log "Website '$($Project.Name)' existiert bereits mit Port $($Project.Port) - wird weiterverwendet." 'Info'
+            $r = Invoke-AppCmd @('start', 'site', "/site.name:$($Project.Name)")
+            $state = @(Get-IisSites | Where-Object { $_.Name -eq $Project.Name })
+            if ($state.Count -gt 0 -and $state[0].State -eq 'Started') { Write-Log 'Website läuft.' 'Ok'; return }
+            throw "Die vorhandene Website konnte nicht gestartet werden: $($r.Output)"
+        }
         if (-not $ReplaceExisting) {
-            throw "Eine Website mit dem Namen '$($Project.Name)' existiert bereits. Auf der Seite 'Prüfen' das Ersetzen erlauben oder die Website vorher im IIS-Manager entfernen."
+            throw "Eine Website mit dem Namen '$($Project.Name)' existiert bereits (anderer Port). Auf der Seite 'Prüfen' das Ersetzen erlauben oder die Website vorher im IIS-Manager entfernen."
         }
         Write-Log "Vorhandene Website '$($Project.Name)' wird entfernt ..." 'Info'
         $r = Invoke-AppCmd @('delete', 'site', "/site.name:$($Project.Name)")
@@ -776,9 +820,20 @@ function Test-Project {
     }
 
     foreach ($c in $Project.ConfigFiles) {
-        $cx = Expand-ProjectText $c $Project
-        if (Test-Path -LiteralPath $cx) { & $add 'Ok' 'Konfig' $cx }
-        else { & $add 'Warn' 'Konfig' "$cx noch nicht vorhanden (entsteht eventuell erst beim Setup)." }
+        $target = Expand-ProjectText $c.Datei $Project
+        $tplRaw = Expand-ProjectText $c.Vorlage $Project
+        if (Test-Path -LiteralPath $target) {
+            & $add 'Ok' 'Konfig' $target
+            continue
+        }
+        $tpl = Find-ConfigTemplate -Target $target -Explicit $tplRaw
+        if ($tpl) {
+            & $add 'Ok' 'Konfig' "$([System.IO.Path]::GetFileName($target)) fehlt noch - wird bei der Installation aus '$([System.IO.Path]::GetFileName($tpl))' erstellt."
+        } elseif ($tplRaw) {
+            & $add 'Error' 'Konfig' "Weder $target noch die angegebene Vorlage $tplRaw sind vorhanden."
+        } else {
+            & $add 'Warn' 'Konfig' "$target noch nicht vorhanden (entsteht eventuell erst beim Setup)."
+        }
     }
 
     $blocked = (@($items | Where-Object { $_.Level -eq 'Error' }).Count -gt 0)
@@ -789,12 +844,20 @@ function Test-Project {
 #  7) Installationsablauf (Seite 3)
 # ==============================================================================
 
+<#
+ Schrittplan: Website, jede SQL-Datei einzeln (damit die Schrittliste und die
+ Ergebnisübersicht pro Datei ein Häkchen oder Kreuz zeigen können) und zum
+ Schluss das Anlegen fehlender Konfigurationsdateien aus ihren Vorlagen.
+#>
 function Get-StepPlan {
     param($Project)
     $steps = New-Object System.Collections.Generic.List[object]
-    $steps.Add(@{ Key = 'site'; Title = 'IIS-Website anlegen' })
-    if ($Project.Sql.Count -gt 0) {
-        $steps.Add(@{ Key = 'sql'; Title = "Datenbank-Skripte ausführen ($($Project.Sql.Count))" })
+    $steps.Add(@{ Key = 'site'; Title = 'IIS-Website anlegen'; Entry = $null })
+    foreach ($s in $Project.Sql) {
+        $steps.Add(@{ Key = 'sql'; Title = "SQL: $($s.Anzeige)"; Entry = $s })
+    }
+    if ($Project.ConfigFiles.Count -gt 0) {
+        $steps.Add(@{ Key = 'cfg'; Title = 'Konfigurationsdateien vorbereiten'; Entry = $null })
     }
     return $steps.ToArray()
 }
@@ -812,45 +875,103 @@ function Set-StepState {
     Invoke-UiPump
 }
 
+<#
+ Legt fehlende Konfigurationsdateien aus ihren Vorlagen an. Vorhandene Dateien
+ werden nie überschrieben. Liefert die Liste der Zieldateien für die Seite
+ "Fertig" (dort öffnen die Schaltflächen dann die echte Datei).
+#>
+function Initialize-ConfigFiles {
+    param($Project)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($c in $Project.ConfigFiles) {
+        $target = Expand-ProjectText $c.Datei $Project
+        $out.Add($target)
+        if (Test-Path -LiteralPath $target) {
+            Write-Log "Konfig vorhanden: $target"
+            continue
+        }
+        $tpl = Find-ConfigTemplate -Target $target -Explicit (Expand-ProjectText $c.Vorlage $Project)
+        if ($tpl) {
+            Copy-Item -LiteralPath $tpl -Destination $target -Force:$false
+            Write-Log ("Aus Vorlage erstellt: {0}  (Quelle: {1})" -f $target, [System.IO.Path]::GetFileName($tpl)) 'Ok'
+        } else {
+            Write-Log "Keine Vorlage für $target gefunden - Datei entsteht eventuell erst beim Projekt-Setup." 'Warn'
+        }
+    }
+    return $out.ToArray()
+}
+
+<#
+ Führt den Schrittplan aus. SQL-Dateien werden alle abgearbeitet, auch wenn
+ eine davon fehlschlägt - so zeigt die Schrittliste am Ende für jede Datei
+ Häkchen oder Kreuz, statt beim ersten Fehler stehen zu bleiben. Schlägt
+ dagegen schon das Anlegen der Website fehl, wird abgebrochen.
+ Jedes SQL-Ergebnis landet zusätzlich in $script:Result.SqlResults für die
+ Übersicht auf der Seite "Fertig".
+#>
 function Invoke-ProjectInstall {
     $p = $script:Sel
     $script:Result = @{
-        Success  = $false
-        Error    = $null
-        SiteUrl  = "http://localhost:$($p.Port)/"
-        SetupUrl = (Expand-ProjectText $p.SetupUrl $p)
-        Configs  = @($p.ConfigFiles | ForEach-Object { Expand-ProjectText $_ $p })
-        Name     = $p.Name
+        Success    = $false
+        Error      = $null
+        SiteUrl    = "http://localhost:$($p.Port)/"
+        SetupUrl   = (Expand-ProjectText $p.SetupUrl $p)
+        Configs    = @($p.ConfigFiles | ForEach-Object { Expand-ProjectText $_.Datei $p })
+        SqlResults = @()
+        Name       = $p.Name
     }
-    $plan = Get-StepPlan $p
+    $plan       = Get-StepPlan $p
+    $sqlResults = New-Object System.Collections.Generic.List[object]
+    $failed     = New-Object System.Collections.Generic.List[string]
     $i = 0
     try {
         Set-Busy $true
         Write-Log ("=== Installation '{0}' gestartet ===" -f $p.Name) 'Step'
+        $pw = $script:TxtRootPw.Text
 
         for ($i = 0; $i -lt $plan.Count; $i++) {
+            $step = $plan[$i]
             Set-StepState $i 'Running'
-            switch ($plan[$i].Key) {
+            switch ($step.Key) {
                 'site' {
                     Write-Log 'IIS-Website anlegen' 'Step'
                     New-ProjectSite -Project $p -ReplaceExisting ([bool]$script:ChkReplace.Checked)
+                    Set-StepState $i 'Done'
                 }
                 'sql' {
-                    Write-Log 'Datenbank-Skripte' 'Step'
-                    $pw = $script:TxtRootPw.Text
-                    foreach ($s in $p.Sql) {
-                        Invoke-MySqlScriptFile -Password $pw -Entry $s
+                    try {
+                        Invoke-MySqlScriptFile -Password $pw -Entry $step.Entry
+                        $sqlResults.Add(@{ Anzeige = $step.Entry.Anzeige; Ok = $true; Text = 'ausgeführt' })
+                        Set-StepState $i 'Done'
+                    } catch {
+                        $msg = $_.Exception.Message
+                        $sqlResults.Add(@{ Anzeige = $step.Entry.Anzeige; Ok = $false; Text = $msg })
+                        $failed.Add($step.Entry.Anzeige)
+                        Write-Log $msg 'Error'
+                        Set-StepState $i 'Failed'
                     }
                 }
+                'cfg' {
+                    Write-Log 'Konfigurationsdateien' 'Step'
+                    $script:Result.Configs = @(Initialize-ConfigFiles $p)
+                    Set-StepState $i 'Done'
+                }
             }
-            Set-StepState $i 'Done'
         }
 
+        $script:Result.SqlResults = $sqlResults.ToArray()
+        if ($failed.Count -gt 0) {
+            $script:Result.Error = ("{0} von {1} SQL-Skripten fehlgeschlagen: {2}. Einzelheiten in der Schrittliste und im Protokoll." -f `
+                $failed.Count, @($p.Sql).Count, ($failed -join ', '))
+            Write-Log ("=== Installation '{0}' mit Fehlern beendet ===" -f $p.Name) 'Error'
+            return $false
+        }
         $script:Result.Success = $true
         Write-Log ("=== Installation '{0}' abgeschlossen ===" -f $p.Name) 'Ok'
         return $true
     } catch {
         Set-StepState $i 'Failed'
+        $script:Result.SqlResults = $sqlResults.ToArray()
         $script:Result.Error = $_.Exception.Message
         Write-Log $_.Exception.Message 'Error'
         return $false
@@ -1188,10 +1309,27 @@ function Load-InstallPage {
 
 $script:PnlFinish = New-Page
 $script:LblFinHead = New-Label $script:PnlFinish 0 0 $pw 30 'Fertig' $script:ColDark $fontHead
-$script:LblFinText = New-Label $script:PnlFinish 0 38 $pw 40 '' $script:ColGray
+$script:LblFinText = New-Label $script:PnlFinish 0 38 $pw 36 '' $script:ColGray
 $script:LblFinText.Anchor = 'Top,Left,Right'
 
-New-Label $script:PnlFinish 0 92 $pw 22 'Nächste Schritte' $script:ColDark $fontBig | Out-Null
+# Ergebnis der Datenbank-Skripte: eine Zeile pro Datei mit Häkchen/Kreuz.
+# Wird in Load-FinishPage befüllt und in der Höhe an die Anzahl angepasst;
+# die Elemente darunter rücken entsprechend nach.
+$script:LblSqlRes = New-Label $script:PnlFinish 0 80 $pw 22 'Datenbank-Skripte' $script:ColDark $fontBig
+$script:LvSqlRes = New-Object System.Windows.Forms.ListView
+$script:LvSqlRes.Location      = New-Object System.Drawing.Point(0, 106)
+$script:LvSqlRes.Size          = New-Object System.Drawing.Size($pw, 80)
+$script:LvSqlRes.Anchor        = 'Top,Left,Right'
+$script:LvSqlRes.View          = 'Details'
+$script:LvSqlRes.HeaderStyle   = 'None'
+$script:LvSqlRes.Font          = $fontSym
+$script:LvSqlRes.FullRowSelect = $true
+[void]$script:LvSqlRes.Columns.Add(' ', 34)
+[void]$script:LvSqlRes.Columns.Add('Datei', 300)
+[void]$script:LvSqlRes.Columns.Add('Ergebnis', $pw - 34 - 300 - 8)
+$script:PnlFinish.Controls.Add($script:LvSqlRes)
+
+$script:LblNextSteps = New-Label $script:PnlFinish 0 92 $pw 22 'Nächste Schritte' $script:ColDark $fontBig
 
 # FlowLayoutPanel: nimmt beliebig viele Schaltflächen auf (Setup-URL und
 # Konfigurationsdateien unterscheiden sich je Projekt)
@@ -1231,6 +1369,38 @@ function Load-FinishPage {
         $(if ($r.SetupUrl) { " - als Nächstes das Setup des Projekts aufrufen und die aufgeführten Dateien prüfen." }
           elseif (@($r.Configs).Count -gt 0) { " - bitte noch die aufgeführten Konfigurationsdateien prüfen." }
           else { "." })
+
+    # SQL-Ergebnisübersicht: pro Datei Häkchen oder Kreuz
+    $sqlRes = @($r.SqlResults)
+    $y = 80
+    if ($sqlRes.Count -gt 0) {
+        $script:LblSqlRes.Visible = $true
+        $script:LvSqlRes.Visible  = $true
+        $script:LblSqlRes.Top = $y
+        $script:LvSqlRes.Top  = $y + 26
+        $script:LvSqlRes.BeginUpdate()
+        $script:LvSqlRes.Items.Clear()
+        foreach ($e in $sqlRes) {
+            $sym = if ($e.Ok) { [char]0x2713 } else { [char]0x2717 }
+            $item = New-Object System.Windows.Forms.ListViewItem([string]$sym)
+            [void]$item.SubItems.Add($e.Anzeige)
+            [void]$item.SubItems.Add($e.Text)
+            $item.ForeColor = if ($e.Ok) { $script:ColOk } else { $script:ColErr }
+            $item.UseItemStyleForSubItems = $true
+            [void]$script:LvSqlRes.Items.Add($item)
+        }
+        $script:LvSqlRes.EndUpdate()
+        $script:LvSqlRes.Height = [math]::Min(120, ($sqlRes.Count * 22) + 8)
+        $y = $script:LvSqlRes.Top + $script:LvSqlRes.Height + 14
+    } else {
+        $script:LblSqlRes.Visible = $false
+        $script:LvSqlRes.Visible  = $false
+    }
+
+    # "Nächste Schritte" und die Schaltflächen unter die Übersicht schieben
+    $script:LblNextSteps.Top = $y
+    $script:FlowFinish.Top    = $y + 28
+    $script:FlowFinish.Height = [math]::Max(60, $ph - $script:FlowFinish.Top - 56)
 
     $script:FlowFinish.Controls.Clear()
     if ($r.SetupUrl) {
