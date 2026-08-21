@@ -31,7 +31,26 @@
          { "datei": "sql/02-tabellen.sql", "datenbank": "renate" }
        ],
        "setupUrl": "http://localhost:{port}/setup.php",  // optional
-       "konfigDateien": [ "config/config.php", ".env" ], // optional, relativ zum Projekt
+       "konfigDateien": [                   // optional, relativ zum Projekt
+         "config/config.php",               // einfacher Pfad: Vorlage wird gesucht
+         { "datei": ".env", "vorlage": ".env.example" }   // oder Vorlage explizit
+       ],
+       "datenbank": {                       // optional: wird am Ende angezeigt
+         "benutzer": "renate_user",
+         "passwort": "12345678",
+         "name":     "renate",
+         "hinweis":  "freier Zusatztext"    // optional
+       },
+       "skripte": [                         // optional - NOCH NICHT IMPLEMENTIERT
+         {
+           "datei":          "setup/aufgabe.ps1",
+           "titel":          "Aufgabe einrichten",
+           "beschreibung":   "Erklaerung fuer den Anwender",
+           "optional":       true,          // false = laeuft immer mit
+           "vorausgewaehlt": true,          // nur bei optional=true
+           "alsAdmin":       true
+         }
+       ],
        "icon": "iVBORw0KGgo..."             // optional: PNG als Base64
      }
    ]
@@ -474,6 +493,19 @@ function Read-ProjectJson {
             }
         }
 
+        # Datenbank-Zugangsdaten: rein informativ, werden am Ende angezeigt.
+        # Sie stammen aus den SQL-Skripten des Projekts - der Installer legt
+        # nichts davon selbst an und prueft sie auch nicht.
+        $db = $null
+        if ($p.datenbank) {
+            $db = [pscustomobject]@{
+                Name     = [string]$p.datenbank.name
+                Benutzer = [string]$p.datenbank.benutzer
+                Passwort = [string]$p.datenbank.passwort
+                Hinweis  = [string]$p.datenbank.hinweis
+            }
+        }
+
         $out.Add([pscustomobject]@{
             Name        = $name
             Dir         = $dir
@@ -482,6 +514,7 @@ function Read-ProjectJson {
             Sql         = $sql.ToArray()
             SetupUrl    = [string]$p.setupUrl
             ConfigFiles = $cfg.ToArray()
+            Datenbank   = $db
             Icon        = $icon
         })
     }
@@ -892,8 +925,18 @@ function Initialize-ConfigFiles {
         }
         $tpl = Find-ConfigTemplate -Target $target -Explicit (Expand-ProjectText $c.Vorlage $Project)
         if ($tpl) {
-            Copy-Item -LiteralPath $tpl -Destination $target -Force:$false
-            Write-Log ("Aus Vorlage erstellt: {0}  (Quelle: {1})" -f $target, [System.IO.Path]::GetFileName($tpl)) 'Ok'
+            # File::Copy mit overwrite=$false statt Copy-Item: Copy-Item ueberschreibt
+            # standardmaessig (-Force steuert nur Schreibschutz/versteckte Dateien), waehrend
+            # File::Copy eine vorhandene Datei im Dateisystem selbst ablehnt. Damit kann auch
+            # eine Datei, die zwischen Test-Path und Kopie entsteht, nicht verlorengehen.
+            try {
+                [System.IO.File]::Copy($tpl, $target, $false)
+                Write-Log ("Aus Vorlage erstellt: {0}  (Quelle: {1})" -f $target, [System.IO.Path]::GetFileName($tpl)) 'Ok'
+            } catch [System.IO.IOException] {
+                Write-Log ("Konfig war bereits vorhanden, Vorlage nicht kopiert: {0}" -f $target) 'Warn'
+            } catch {
+                Write-Log ("Vorlage konnte nicht kopiert werden: {0} -> {1} ({2})" -f $tpl, $target, $_.Exception.Message) 'Warn'
+            }
         } else {
             Write-Log "Keine Vorlage für $target gefunden - Datei entsteht eventuell erst beim Projekt-Setup." 'Warn'
         }
@@ -919,6 +962,7 @@ function Invoke-ProjectInstall {
         Configs    = @($p.ConfigFiles | ForEach-Object { Expand-ProjectText $_.Datei $p })
         SqlResults = @()
         Name       = $p.Name
+        Datenbank  = $p.Datenbank
     }
     $plan       = Get-StepPlan $p
     $sqlResults = New-Object System.Collections.Generic.List[object]
@@ -1329,6 +1373,14 @@ $script:LvSqlRes.FullRowSelect = $true
 [void]$script:LvSqlRes.Columns.Add('Ergebnis', $pw - 34 - 300 - 8)
 $script:PnlFinish.Controls.Add($script:LvSqlRes)
 
+# Datenbank-Zugangsdaten: was in die Konfigurationsdatei des Projekts gehoert.
+# Werte in fester Schrift (leichter abzutippen), Zusatzhinweis darunter in der
+# normalen Schrift - dessen Hoehe wird gemessen, damit nichts abgeschnitten wird.
+$script:LblDbHead = New-Label $script:PnlFinish 0 86 $pw 22 'Datenbank-Zugang' $script:ColDark $fontBig
+$script:LblDbInfo = New-Label $script:PnlFinish 0 110 $pw 60 '' $script:ColDark
+$script:LblDbInfo.Font = New-Object System.Drawing.Font('Consolas', 9.5)
+$script:LblDbNote = New-Label $script:PnlFinish 0 170 $pw 34 '' $script:ColGray
+
 $script:LblNextSteps = New-Label $script:PnlFinish 0 92 $pw 22 'Nächste Schritte' $script:ColDark $fontBig
 
 # FlowLayoutPanel: nimmt beliebig viele Schaltflächen auf (Setup-URL und
@@ -1397,6 +1449,45 @@ function Load-FinishPage {
         $script:LvSqlRes.Visible  = $false
     }
 
+    # Datenbank-Zugangsdaten anzeigen - nur wenn die Installation geklappt hat
+    # und in der JSON etwas hinterlegt ist. Die Werte stammen aus den
+    # SQL-Skripten des Projekts; genau sie gehoeren in dessen Konfigurationsdatei.
+    $db = $r.Datenbank
+    if ($r.Success -and $db -and ($db.Benutzer -or $db.Name)) {
+        $lines = New-Object System.Collections.Generic.List[string]
+        if ($db.Name)     { $lines.Add(("Datenbank :  {0}" -f $db.Name)) }
+        if ($db.Benutzer) { $lines.Add(("Benutzer  :  {0}" -f $db.Benutzer)) }
+        if ($db.Passwort) { $lines.Add(("Passwort  :  {0}" -f $db.Passwort)) }
+
+        $script:LblDbHead.Visible = $true
+        $script:LblDbInfo.Visible = $true
+        $script:LblDbHead.Top    = $y
+        $script:LblDbInfo.Top    = $y + 26
+        $script:LblDbInfo.Text   = ($lines -join [Environment]::NewLine)
+        $script:LblDbInfo.Height = ($lines.Count * 17) + 4
+        $y = $script:LblDbInfo.Top + $script:LblDbInfo.Height
+
+        if ($db.Hinweis) {
+            # Hoehe messen statt schaetzen - der Hinweis ist oft mehrzeilig.
+            $prop = New-Object System.Drawing.Size($pw, 0)
+            $size = [System.Windows.Forms.TextRenderer]::MeasureText(
+                        [string]$db.Hinweis, $script:LblDbNote.Font, $prop,
+                        [System.Windows.Forms.TextFormatFlags]::WordBreak)
+            $script:LblDbNote.Visible = $true
+            $script:LblDbNote.Top     = $y + 6
+            $script:LblDbNote.Text    = [string]$db.Hinweis
+            $script:LblDbNote.Height  = $size.Height + 4
+            $y = $script:LblDbNote.Top + $script:LblDbNote.Height
+        } else {
+            $script:LblDbNote.Visible = $false
+        }
+        $y += 14
+    } else {
+        $script:LblDbHead.Visible = $false
+        $script:LblDbInfo.Visible = $false
+        $script:LblDbNote.Visible = $false
+    }
+
     # "Nächste Schritte" und die Schaltflächen unter die Übersicht schieben
     $script:LblNextSteps.Top = $y
     $script:FlowFinish.Top    = $y + 28
@@ -1418,7 +1509,7 @@ function Load-FinishPage {
         Show-Page 'select'
     }
 
-    $script:LblFinNote.Text = 'Hinweis: SQL-Skripte legen Datenbank und Benutzer an - die Zugangsdaten des Projekts stehen in dessen Konfigurationsdateien bzw. SQL-Skripten.'
+    $script:LblFinNote.Text = 'Hinweis: Die SQL-Skripte haben Datenbank und Benutzer angelegt. Dieselben Zugangsdaten müssen in der Konfigurationsdatei des Projekts eingetragen sein - das Passwort danach in der Datenbank ändern.'
 }
 
 # ==============================================================================

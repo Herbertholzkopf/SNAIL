@@ -1,5 +1,9 @@
 {
-  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard. konfigDateien: einfacher Pfad oder { datei, vorlage } - fehlt die Datei, wird sie bei der Installation aus der Vorlage kopiert; ohne Angabe werden <datei>.example, <datei>.dist und config.example.php-Muster automatisch gesucht.",
+  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard. sql: einfacher Pfad oder { datei, datenbank }. konfigDateien: einfacher Pfad oder { datei, vorlage } - fehlt die Datei, wird sie bei der Installation aus der Vorlage kopiert; ohne Angabe werden <datei>.example, <datei>.dist und config.example.php-Muster automatisch gesucht. skripte: PowerShell-Dateien fuer die Windows-Aufgabenplanung - NOCH NICHT IMPLEMENTIERT, die Felder sind bereits hinterlegt (siehe _skripteDoku). datenbank: Zugangsdaten, die am Ende der Installation angezeigt werden.",
+
+  "_skripteDoku": "Geplant, noch ohne Wirkung im Installer. Je Eintrag: datei (relativ zum Projektordner), titel (Anzeige), beschreibung (Erklaerung fuer den Anwender), optional (false = laeuft immer, true = Anwender waehlt aus), vorausgewaehlt (nur bei optional=true: Haekchen anfangs gesetzt?), alsAdmin (Skript braucht erhoehte Rechte). Alle Skripte legen Windows-Aufgaben an und sind mehrfach ausfuehrbar.",
+
+  "_geplanteProjekte": "Gisela (App zum Tracken von Arbeitszeiten beim Kunden) und Manfred sind als Repository angelegt, enthalten aber bisher nur eine README - keine Datenbank, keine Konfiguration, kein Code. Sobald dort etwas existiert, werden sie hier als regulaere Projekte ergaenzt.",
 
   "einstellungen": {
     "wwwroot":   "C:\\inetpub\\wwwroot",
@@ -9,28 +13,203 @@
 
   "projekte": [
     {
-      "name":    "Renate",
-      "ordner":  "renate",
+      "name":    "Gertrud",
+      "ordner":  "gertrud",
       "docroot": "",
-      "port":    8081,
+      "port":    8001,
+      "setupUrl": "http://localhost:{port}/",
       "sql": [
-        "sql/01-benutzer-und-datenbank.sql",
-        { "datei": "sql/02-tabellen.sql", "datenbank": "renate" }
+        "setup/create.sql",
+        "setup/database.sql"
       ],
-      "setupUrl": "http://localhost:{port}/setup.php",
-      "konfigDateien": [ "config/config.php" ],
+      "konfigDateien": [
+        { "datei": "config/db-config.php", "vorlage": "config/db-config.php.example" }
+      ],
+      "datenbank": {
+        "name":     "aufgabenverwaltung",
+        "benutzer": "aufgabenverwaltung_user",
+        "passwort": "12345678"
+      },
+      "skripte": [],
+      "icon": "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"
+    },
+    {
+      "name":    "Hildegard",
+      "ordner":  "hildegard",
+      "docroot": "",
+      "port":    8002,
+      "setupUrl": "http://localhost:{port}/",
+      "sql": [
+        "setup/Datenbank/create.sql",
+        "setup/Datenbank/database-kunden_manager.sql"
+      ],
+      "konfigDateien": [
+        { "datei": "config/config.php", "vorlage": "config/config.php.example" }
+      ],
+      "datenbank": {
+        "name":     "hildegard",
+        "benutzer": "hildegard_user",
+        "passwort": "12345678"
+      },
+      "skripte": [
+        {
+          "datei":          "setup/Aufgabenplanung/aufgabe_erstellen-script_runner.ps1",
+          "titel":          "Script-Runner einrichten",
+          "beschreibung":   "Legt die Windows-Aufgabe an, die alle taeglichen und monatlichen Berichts-Mails verschickt. Laeuft beim Hochfahren und danach alle 2 Stunden; bereits versendete Berichte werden uebersprungen.",
+          "optional":       false,
+          "vorausgewaehlt": true,
+          "alsAdmin":       true
+        }
+      ],
+      "icon": "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"
+    },
+    {
+      "name":    "Movie-Manager3",
+      "ordner":  "movie-manager3",
+      "docroot": "",
+      "port":    8003,
+      "setupUrl": "http://localhost:{port}/",
+      "sql": [
+        "setup/Datenbank/create.sql",
+        "setup/Datenbank/schema.sql"
+      ],
+      "konfigDateien": [
+        { "datei": "config/config.php", "vorlage": "config/config.sample.php" }
+      ],
+      "datenbank": {
+        "name":     "movie-manager3",
+        "benutzer": "movie-manager3_user",
+        "passwort": "12345678"
+      },
+      "skripte": [],
+      "icon": ""
+    },
+    {
+      "name":    "Norbert",
+      "ordner":  "norbert",
+      "docroot": "",
+      "port":    8004,
+      "setupUrl": "http://localhost:{port}/",
+      "sql": [
+        "setup/Datenbank/create.sql",
+        "setup/Datenbank/database.sql"
+      ],
+      "konfigDateien": [
+        { "datei": "config/config.php", "vorlage": "config/config.php.example" }
+      ],
+      "datenbank": {
+        "name":     "norbert",
+        "benutzer": "norbert_user",
+        "passwort": "12345678"
+      },
+      "skripte": [
+        {
+          "datei":          "setup/Automationen/aufgabe_erstellen_abruf.ps1",
+          "titel":          "Abruf der Connectoren einrichten",
+          "beschreibung":   "Legt die Windows-Aufgabe an, die alle aktiven Dienste in ihren eingestellten Intervallen abruft. Ohne diese Aufgabe sammelt Norbert keine Daten.",
+          "optional":       false,
+          "vorausgewaehlt": true,
+          "alsAdmin":       true
+        },
+        {
+          "datei":          "setup/Automationen/aufgabe_erstellen_tagesbericht.ps1",
+          "titel":          "Tagesbericht um 07:00 Uhr",
+          "beschreibung":   "Verschickt taeglich um 7 Uhr eine Mail mit allen offline gemeldeten Geraeten. War der Server aus, wird der Bericht beim naechsten Hochfahren nachgeholt.",
+          "optional":       true,
+          "vorausgewaehlt": true,
+          "alsAdmin":       true
+        },
+        {
+          "datei":          "setup/Automationen/aufgabe_erstellen_go2rtc-waechter.ps1",
+          "titel":          "go2rtc-Waechter fuer Kamera-Streams",
+          "beschreibung":   "Nur noetig, wenn Kameras genutzt werden. Erzeugt die go2rtc-Konfiguration aus der Datenbank, startet go2rtc nach einem Server-Neustart und laedt es bei Aenderungen neu.",
+          "optional":       true,
+          "vorausgewaehlt": false,
+          "alsAdmin":       true
+        },
+        {
+          "datei":          "setup/Automationen/kamera-proxy_einrichten.ps1",
+          "titel":          "Kamera-Proxy ueber HTTPS",
+          "beschreibung":   "Nur noetig, wenn Kameras genutzt werden UND das Dashboard ueber HTTPS laeuft. Installiert die IIS-Komponenten, damit /kamera/... an das lokale go2rtc weitergeleitet wird (verhindert Mixed-Content-Blockade).",
+          "optional":       true,
+          "vorausgewaehlt": false,
+          "alsAdmin":       true
+        }
+      ],
       "icon": ""
     },
     {
       "name":    "Olaf",
       "ordner":  "olaf",
-      "docroot": "public",
-      "port":    8082,
+      "docroot": "",
+      "port":    8005,
+      "setupUrl": "http://localhost:{port}/",
       "sql": [
-        "datenbank/create-user.sql",
-        "datenbank/schema.sql"
+        "setup/Datenbank/create.sql",
+        "setup/Datenbank/database.sql",
+        "setup/Datenbank/index.sql",
+        "setup/Datenbank/wissensdatenbank-eintraege.sql"
       ],
-      "konfigDateien": [ { "datei": ".env", "vorlage": ".env.example" } ]
+      "konfigDateien": [
+        { "datei": "config.php",                       "vorlage": "config.php.example" },
+        { "datei": "processing/config/database.py",    "vorlage": "processing/config/database.py.example" },
+        { "datei": "processing/config/mail.py",        "vorlage": "processing/config/mail.py.example" },
+        { "datei": "processing/config/alerts.py",      "vorlage": "processing/config/alerts.py.example" }
+      ],
+      "datenbank": {
+        "name":     "olaf",
+        "benutzer": "olaf_user",
+        "passwort": "12345678",
+        "hinweis":  "Zusaetzlich wird der Lesebenutzer 'norbert_lesen' (nur SELECT, Passwort 12345678) angelegt - den braucht Norbert, um auf Olaf zuzugreifen. Ohne Norbert wird er einfach nicht verwendet."
+      },
+      "skripte": [
+        {
+          "datei":          "setup/Aufgabenplanung/skript-runner.ps1",
+          "titel":          "Script-Runner einrichten",
+          "beschreibung":   "Legt die Windows-Aufgabe fuer processing/script_runner.py an. Ohne diese Aufgabe werden keine Mails eingelesen und keine Backup-Jobs ausgewertet.",
+          "optional":       false,
+          "vorausgewaehlt": true,
+          "alsAdmin":       true
+        },
+        {
+          "datei":          "setup/Aufgabenplanung/taegliche-status-mail.ps1",
+          "titel":          "Taegliche Backup-Status-Mail (08:00 Uhr)",
+          "beschreibung":   "Verschickt jeden Morgen um 8 Uhr den Backup-Status per Mail.",
+          "optional":       true,
+          "vorausgewaehlt": true,
+          "alsAdmin":       true
+        },
+        {
+          "datei":          "setup/Aufgabenplanung/monatlicher-stumm-bericht.ps1",
+          "titel":          "Monatsbericht stummgeschalteter Jobs (1. des Monats, 08:00 Uhr)",
+          "beschreibung":   "Verschickt am 1. jedes Monats eine Uebersicht aller stummgeschalteten Backup-Jobs.",
+          "optional":       true,
+          "vorausgewaehlt": false,
+          "alsAdmin":       true
+        }
+      ],
+      "icon": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAK1ElEQVR42u2aWaxd11nHf99aa+99pnt97/X1bMdDDDUhOJEcWkoJ1CCG0qAmAVGpLygSEkPViifgkRd4qcokKoRaCC0qxVBoqhQaiYaWqlUESRsRYtdTIk+x4yF3PPucPay1Ph72Ofda7Ru+17Hru17W2vsMe3//9U3/71ty9vwN5R4ehnt8bACwAcAGABsAbACwAcAGABsA3LPD3c6HaVQURUQQkXsDAFVFVbHWkrZTRIS6qgkh3BEguPUW3jpLkibkSzlnj5+hLEr2H7qfyelNVEXxtoPg1lP4JE1YuDHP8W8d58TLJ7h65Sp5f4kk8Tz10V9n3w/9MFVZYq39/gJAVUmzlNdOnOWZv3uGubfm8dWAYrhISWBh8y6+dE35vUe6WGMoy/Jt04R1AWBs58/985e58NpZRDy5scT9h0mPHGX7A0c4T8mxZ5/j0PZpDj7wIMH77w8Axg5vkA+4fPESueug9x9GDv0obude4mCO/CvH4MyLfPL4y2zdPsNffOpTJGlGiBFzmzXBrcfuhxjpdTOm3v0+Ti1N0Nu2BRYuI//+WdI3T6KL1xlWBfsP7Oaxx9/PRNthreCDpfARBeSu9gFRyVopP/Xow3zr6a/RPv0fpAsXsaGgRpncuYOf/4kjHP3pR9mzdw8aY+MDFDIfyctA7ZXboQzrAoC1hqW84Nt/f4wtx/+HJINsosvk7CzveGA/73zPOzlwYB9ZK0U1YmwjqQKJGCZE6BeBKsR114R1C4OCoCg77tvND/zIfnbv38aevbvYsWsnvW4XlxiMkRXhRw4EFRCBTmqJheJV1xUEWZeqsIJNLPNv3mC41GdyeoJW1qLb7eJ9xWf++tM88cHH2XfwPvrLi3zyz5/myQ89yb7791AMSjQKMUBdRwYh3H1kSIxQDgqMt2yZ3UE3myJLOoClrj1nTp0gX+5jMdSl59Srr9BfXECiEn0ghkiMiqhgEfRu0wAxQj6Xo7mh3ctW1d2BscLcW28yvXULJkkx1jA3t8DM7GZSlxKjonVNKAtiAK9KbeLdlwmWeYXxGb5uSI84iEEQVbbu2Mv8uRMUz3+GiU0ps9u2wuQsVXuGgEWn9mBmDhCDR3V9SfuaARBjE7ZEBNWIrwPGB6rSjFyibeSIiq8ig/Oncd/+V9xsm/qsIJ2MUlIqH7AP/QrZox8m+gpV07ylrDJLY8ydYwKqzc/b7YwYlbKsQSJXzlzFVB2yjiNJLUnazNYajBPK4RLDk9/EGYXuND7rYbIuWW+KrDMNKmhUQlDoAUZJnCNJE4aDYuW5t8ohbkkDjDFYa1Dg3575OjOzm3jXex6iKEsiNVVRgW20IwYlhIhLLM4bkmSS5JHHETEIisSIakRjIPpIDAHvI1EjqTqyNOXsqfO8/NJJfumXj5K1EmJQvA+3lDCZWxG+vzzg9TMX6XbbfP35F/mvb76CSxxGDJoIVT2kGATKoacYeopBTZFXDAcVw7ykXFiiXFigXFqi6OcU/SFFXjIcVAxG3x0UnigNtT576gLPfv6rJInj8sXr3Lg+j3Pm9ofBGCNplnDutUv8/kc+zpe/+J/0JrokiSPGJnt79sXAG/N9bPAMBhWDQcVwUDMY1M11XjHIawYDT57X5HlzL89rBnlFGFb0+xXHThuWC8EQEWOYmp7gxRf+l9/98Md46YVXyVopMcbbawLGGIphyYMP/yAfeuox/urP/hEB3v/Ee3HWsFxHzl21nHxN+cCDA/ZMpaCRGAN4QzQGbwVjDGaU+QlgUFTB+8iVQng+n+J17ZJXOc4KnU6Lt64v8Md/+Lcc/bl38TO/8GMM8vKWnKK7Nc8f+eCv/SJ79u/kLz/+OS6cu8ziYh8j0EnhcpXxD6/W7JmM7Ju2TLcNEy1DLzOkTjCmKY4GoIiGfjAsB8OFusUl7VJlXTpJxBplMCw5ffI8IsJTv/Ukjz35XsqiJIRbI023BICIcOPaPFmW8O6ffJgv/cvX+JtPfJ6PfPQD9NoGZw0uc5zLldeHgrWGLHM4Z7C2AQBnUedQl+CtQ63DpAlZakgkkklg30yL5774Vb5w7Csc/dlH2Ll7K29dn6fb69wyY/x/645GxTnLwvwyn/jYZ3nphVfZfd92Dh/eS2KUhw62qGqwBtpZQq+V0G4nmCQh2gTvMuqkjU9bxCRDXEKWGDqJ0DKKQ+lXcGha2NpzHDlyiMMPH+T0dy7wp3/0ad64eI00TW7J/tcsFS6GjSpWw2U6qZClGYjlT76wyH+fKZicTEhTiziLWItYA3a0dgY1o3ViMNZhEotH2JTAHxxN2LlJGBYV1+YW6JeeJHG0O+01qResSSbY7bVRhcVyAY0WHyOt1PA7T0zzT98Y8I2TBYt5RC2YpOEENhHECiYKrVZDIdUrwdcwrFkq4dHDbfbPWpYLxVjL1ESHrNeQoxDWhh+sCQAxwrC/RF2WpN0uqFJ7JUvhN943xeM/Dqcve64sRG70lWENVQSMoY7wnTcqAtIkRdaQthOyXhvbzoihqQdY63DWocMCL2bNqshrAoAIlEWOMdLk61HBKj5Eloee2cmUvVu7OGcxJkHEECI4K7y54Pntp69TYElbDpMlJJ0EjW4lPK68rEtIXU1YQ3K4RhoQ8XWFQ4hRMSYSxxVeEykrT+0V6xzORpxziBgSFSofECs4EcTIioNVbfqIMSoxNmRIRLAiiEb0TtEAEcF7T/A1LmmyshAFIRIQkEBT52qWAQUUYyxWTOPFle8tekjDIUIIhNFfrEdhZG3osCoax5RYkRAJepOejk3DNKQo2ohIxKgl+DiqogmKIICOAFNtyI73YKQptcUQR+XTO8gHjNU2eAUNEEGNR6MlBoim2fFgI8YErLGIBIgGX0WMgUQiFk/EklJTYYg+UBYVtRdG1kFde9QacAKqd4oTFDQKIY6Fb3YsGjBWCWIwJmKMbfJ/ExAxRG8JVaBudfjVd8yzNDfkubmd/ObBi3zu9BaGgw6hrqkqswJAVXvopGtWKV6TREhEuHruEmU+JEkaB9cQnaYWKGb1Wow08+gzxfD6omX/VKD0kSu544HNnvOLDucsu3oRHxuFj6r44ElneisO8+3XANVR7G6xfGMZokFG1HUssIjBjE6FrKzN6vX9baiHhtQIBzsly7lle1aD1vT7q6HW1wHTsrSsWakIvf0ASFO6mpiZYv7SPEVe45wFbUAQkSYcjmYZrUUEoZkHjD9rnKERGIwc4jjaKRDqmunZ2UYd9A6KAjFGkixhy95tnH/lArUErLPQ5HerAstYqNE9ZCTgTWeGhJHoq7FfVanLms17Z2hNZESva9Y9Xbu+gIJJDPNvLHDhlUtUwxrrLMaZld0eC7UiooznVaFvtm0NSvBN73DrwVm2HNjcZJl3ZF9AINaRmV1TdCbbXDlznbmLC+TzJRq0MQG7qgnj3R2DpzrKJ0alc4yQtRM2bZ9g28HN9DZ3RznAHd4ZUlWMNRhrqAYVi9f6LF/P6c8PqQY1deHxVSDGsdQNK3SJJcksaSehs6nFxGyXya092pNZkwCNQ8Hd0hxVmgZGYwLjRCkSfESDrvb/RDBuVB+0gk3sSse4KY/rTaZzl7TGxjatqvjKr9wUAZdYSFdD2woPGIEWfWwyyrGnWOcDAut+UPK7ebvqSOKbCZB8L3i3a9zWo7LfrSV3wtg4Lb4BwAYAGwBsALABwAYAGwDcs+P/AN6CSxMBrgH8AAAAAElFTkSuQmCC"
+    },
+    {
+      "name":    "Renate",
+      "ordner":  "renate",
+      "docroot": "",
+      "port":    8006,
+      "setupUrl": "http://localhost:{port}/",
+      "sql": [
+        "setup/Datenbank/create.sql",
+        "setup/Datenbank/database.sql"
+      ],
+      "konfigDateien": [
+        { "datei": "config/config.php", "vorlage": "config/config.example.php" }
+      ],
+      "datenbank": {
+        "name":     "renate",
+        "benutzer": "renate_user",
+        "passwort": "12345678"
+      },
+      "skripte": [],
+      "icon": ""
     }
   ]
 }

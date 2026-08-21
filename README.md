@@ -120,7 +120,7 @@ Baut mit [PS2EXE](https://github.com/MScholtes/PS2EXE) eine einzelne `Projekt-In
 | Datei | Zweck |
 |---|---|
 | `Projekt-Installer.ps1` | der Installer selbst |
-| `projekte.json` | Projektliste (Vorlage: `projekte.beispiel.json`) |
+| `projekte.json` | Projektliste – die echten Projekte; fehlt sie, legt der Installer per Schaltfläche eine Vorlage an |
 | `Build-Projekt-Installer.ps1` | erzeugt die verteilbare EXE (PS2EXE) |
 | `New-Icon.ps1` | wandelt ein PNG in eine `.ico` für die EXE |
 
