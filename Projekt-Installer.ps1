@@ -18,7 +18,9 @@
    "einstellungen": {
      "wwwroot":   "C:\\inetpub\\wwwroot",   // Basisordner für relative Projektordner
      "mysqlBin":  "",                        // leer = mysql.exe automatisch suchen
-     "mysqlPort": 3306
+     "mysqlPort": 3306,
+     "phpExe":    "",                    // fuer die Setup-Skripte; leer = Skript sucht selbst
+     "pythonExe": ""
    },
    "projekte": [
      {
@@ -37,18 +39,18 @@
        ],
        "datenbank": {                       // optional: wird am Ende angezeigt
          "benutzer": "renate_user",
-         "passwort": "12345678",
+         "passwort": "12345678",          // Platzhalter; wird beim Installieren ersetzt
          "name":     "renate",
          "hinweis":  "freier Zusatztext"    // optional
        },
-       "skripte": [                         // optional - NOCH NICHT IMPLEMENTIERT
+       "skripte": [                         // optional: Windows-Aufgaben einrichten
          {
            "datei":          "setup/aufgabe.ps1",
            "titel":          "Aufgabe einrichten",
            "beschreibung":   "Erklaerung fuer den Anwender",
            "optional":       true,          // false = laeuft immer mit
            "vorausgewaehlt": true,          // nur bei optional=true
-           "alsAdmin":       true
+           "alsAdmin":       true           // nur dokumentarisch
          }
        ],
        "icon": "iVBORw0KGgo..."             // optional: PNG als Base64
@@ -161,9 +163,15 @@ $script:AppCmd     = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
 $script:LogDir     = Join-Path $env:ProgramData 'PHP-IIS-Setup'
 $script:LogFile    = Join-Path $script:LogDir ('projekt_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))
 $script:CredFile   = Join-Path $script:LogDir 'mysql-zugangsdaten.txt'
+# Je Projekt eine Datei mit den erzeugten Datenbank-Zugangsdaten. Wird bei
+# einer erneuten Installation wieder gelesen, damit dasselbe Passwort
+# vorgeschlagen wird (Projektordner geloescht, Datenbank neu aufgesetzt).
+$script:ProjCredDir = Join-Path $script:LogDir 'projekt-zugangsdaten'
 
 $script:MySqlPort  = 3306
 $script:MySqlBin   = ''        # aus JSON, sonst automatische Suche
+$script:PhpExe     = ''        # aus JSON, sonst sucht das Setup-Skript selbst
+$script:PythonExe  = ''        # dito
 
 $script:Projects   = @()       # normalisierte Projekte aus der JSON
 $script:JsonErrors = @()       # Validierungsmeldungen
@@ -427,6 +435,9 @@ function Read-ProjectJson {
         if ($e.wwwroot)   { $script:WwwRoot  = [string]$e.wwwroot }
         if ($e.mysqlBin)  { $script:MySqlBin = [string]$e.mysqlBin }
         if ($e.mysqlPort) { $script:MySqlPort = [int]$e.mysqlPort }
+        # Fuer die Setup-Skripte der Projekte. Leer = das Skript sucht selbst.
+        if ($e.phpExe)    { $script:PhpExe    = [string]$e.phpExe }
+        if ($e.pythonExe) { $script:PythonExe = [string]$e.pythonExe }
     }
 
     $list  = @($json.projekte)
@@ -514,7 +525,35 @@ function Read-ProjectJson {
                 Benutzer = [string]$p.datenbank.benutzer
                 Passwort = [string]$p.datenbank.passwort
                 Hinweis  = [string]$p.datenbank.hinweis
+                # Wert, der in SQL und Konfiguration durch das erzeugte
+                # Passwort ersetzt wird. Ohne Angabe der uebliche 12345678.
+                Platzhalter = if ($p.datenbank.passwortPlatzhalter) {
+                                  [string]$p.datenbank.passwortPlatzhalter
+                              } else { '12345678' }
             }
+        }
+
+        # Setup-Skripte (PowerShell). "optional" entscheidet, ob der Anwender
+        # sie abwaehlen kann; "vorausgewaehlt" nur der Anfangszustand des Hakens.
+        $skripte = New-Object System.Collections.Generic.List[object]
+        foreach ($s in @($p.skripte)) {
+            if ($null -eq $s) { continue }
+            $sd = [string]$s.datei
+            if ([string]::IsNullOrWhiteSpace($sd)) {
+                $script:JsonErrors += "${where}: Ein Skript-Eintrag hat kein Feld 'datei'."
+                continue
+            }
+            $abs = if ([System.IO.Path]::IsPathRooted($sd)) { $sd } else { Join-Path $dir $sd }
+            $opt = [bool]$s.optional
+            $skripte.Add([pscustomobject]@{
+                Datei         = $abs
+                Anzeige       = $sd
+                Titel         = if ($s.titel) { [string]$s.titel } else { [System.IO.Path]::GetFileName($sd) }
+                Beschreibung  = [string]$s.beschreibung
+                Optional      = $opt
+                # Pflichtskripte laufen immer; optionale starten mit dem Wunsch aus der JSON
+                Gewaehlt      = if ($opt) { [bool]$s.vorausgewaehlt } else { $true }
+            })
         }
 
         $out.Add([pscustomobject]@{
@@ -526,6 +565,7 @@ function Read-ProjectJson {
             SetupUrl    = [string]$p.setupUrl
             ConfigFiles = $cfg.ToArray()
             Datenbank   = $db
+            Skripte     = $skripte.ToArray()
             Icon        = $icon
         })
     }
@@ -561,6 +601,122 @@ function New-LetterIcon {
         $font.Dispose(); $fmt.Dispose()
     } finally { $g.Dispose() }
     return $bmp
+}
+
+<#
+ ------------------------------------------------------------------------------
+ Datenbank-Passwoerter
+ ------------------------------------------------------------------------------
+ Die SQL-Skripte der Projekte enthalten einen Platzhalter (standardmaessig
+ 12345678). Bei der Installation wird daraus ein zufaelliges Passwort - aber
+ nur fuer den Hauptbenutzer des Projekts. Nebenbenutzer wie 'norbert_lesen',
+ die einem anderen Projekt gehoeren, behalten den Platzhalter, weil der
+ Installer bei deren Projekt sonst ein Passwort einsetzen muesste, das er
+ nicht kennt. Darauf wird auf der Seite "Fertig" hingewiesen.
+
+ Erzeugte Passwoerter landen unter
+ C:\ProgramData\PHP-IIS-Setup\projekt-zugangsdaten\<ordner>.txt
+ und werden bei einer erneuten Installation von dort wieder gelesen. So passt
+ das Passwort weiterhin, wenn nur der Projektordner geloescht wurde, und die
+ Konfigurationsdatei bekommt denselben Wert wie beim ersten Mal.
+#>
+
+# Zufallspasswort. Bewusst nur Buchstaben und Ziffern: der Wert landet in
+# SQL-Anweisungen, PHP- und Python-Dateien und in einer INI - Anfuehrungs-
+# zeichen, Backslashes oder Dollarzeichen muesste jede dieser Ebenen anders
+# maskieren. 20 Stellen aus 62 Zeichen sind rund 119 Bit und damit reichlich.
+function New-ProjectPassword {
+    param([int]$Length = 20)
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    $bytes = New-Object byte[] $Length
+    $rng   = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    -join ($bytes | ForEach-Object { $alphabet[$_ % $alphabet.Length] })
+}
+
+function Get-ProjectCredPath {
+    param([Parameter(Mandatory)]$Project)
+    # Ordnername statt Anzeigename: der ist eindeutig und dateisystemtauglich
+    $safe = ([System.IO.Path]::GetFileName($Project.Dir)) -replace '[^\w\.-]', '_'
+    Join-Path $script:ProjCredDir ($safe + '.txt')
+}
+
+<#
+ Liefert das Passwort fuer den Hauptbenutzer: entweder das bereits abgelegte
+ aus einer frueheren Installation oder ein frisch erzeugtes. Die zweite
+ Rueckgabe sagt, woher es stammt - das steht spaeter auf der Seite "Fertig".
+#>
+function Resolve-ProjectPassword {
+    param([Parameter(Mandatory)]$Project)
+    $file = Get-ProjectCredPath $Project
+    if (Test-Path -LiteralPath $file) {
+        try {
+            foreach ($line in [System.IO.File]::ReadAllLines($file, [System.Text.Encoding]::UTF8)) {
+                if ($line -match '^\s*passwort\s*=\s*(.+?)\s*$') {
+                    Write-Log "Passwort aus vorheriger Installation uebernommen: $file" 'Info'
+                    return [pscustomobject]@{ Passwort = $Matches[1]; Neu = $false; Datei = $file }
+                }
+            }
+            Write-Log "Zugangsdaten-Datei ohne Eintrag 'passwort': $file - es wird ein neues erzeugt." 'Warn'
+        } catch {
+            Write-Log "Zugangsdaten-Datei nicht lesbar ($($_.Exception.Message)) - es wird ein neues Passwort erzeugt." 'Warn'
+        }
+    }
+    return [pscustomobject]@{ Passwort = (New-ProjectPassword); Neu = $true; Datei = $file }
+}
+
+# Schreibt die Zugangsdaten neben das Protokoll. Fehler hier duerfen die
+# Installation nicht abbrechen - dann steht das Passwort eben nur im Fenster.
+function Save-ProjectCredentials {
+    param([Parameter(Mandatory)]$Project, [Parameter(Mandatory)][string]$Password)
+    $file = Get-ProjectCredPath $Project
+    try {
+        if (-not (Test-Path -LiteralPath $script:ProjCredDir)) {
+            [void](New-Item -ItemType Directory -Path $script:ProjCredDir -Force)
+        }
+        $db = $Project.Datenbank
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine('# Vom Projekt-Installer erzeugt - bitte nicht von Hand umbenennen.')
+        [void]$sb.AppendLine('# Bei einer erneuten Installation wird "passwort" von hier gelesen.')
+        [void]$sb.AppendLine(('# Stand: {0:yyyy-MM-dd HH:mm:ss}' -f (Get-Date)))
+        [void]$sb.AppendLine(('projekt=' + $Project.Name))
+        if ($db) {
+            [void]$sb.AppendLine(('datenbank=' + $db.Name))
+            [void]$sb.AppendLine(('benutzer='  + $db.Benutzer))
+        }
+        [void]$sb.AppendLine(('passwort=' + $Password))
+        [System.IO.File]::WriteAllText($file, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+        Write-Log "Zugangsdaten abgelegt: $file" 'Ok'
+    } catch {
+        Write-Log "Zugangsdaten konnten nicht abgelegt werden ($file): $($_.Exception.Message)" 'Warn'
+    }
+    return $file
+}
+
+<#
+ Ersetzt den Platzhalter im SQL-Text - gezielt nur dort, wo der Hauptbenutzer
+ sein Passwort bekommt. Eine einfache Textersetzung wuerde auch Nebenbenutzer
+ treffen, die in derselben Datei angelegt werden (Olaf legt 'norbert_lesen'
+ mit an). Erfasst CREATE USER, ALTER USER und SET PASSWORD FOR.
+ Liefert den neuen Text und die Anzahl der Ersetzungen.
+#>
+function Set-SqlUserPassword {
+    param(
+        [Parameter(Mandatory)][string]$Sql,
+        [Parameter(Mandatory)][string]$User,
+        [Parameter(Mandatory)][string]$Placeholder,
+        [Parameter(Mandatory)][string]$NewPassword
+    )
+    $u  = [regex]::Escape($User)
+    $ph = [regex]::Escape($Placeholder)
+    # Gruppe 1: alles bis zum oeffnenden Anfuehrungszeichen des Passworts,
+    # Gruppe 2: das schliessende. Dazwischen steht der Platzhalter.
+    $muster = "(?is)(['``]" + $u + "['``]\s*@\s*'[^']*'\s*(?:IDENTIFIED\s+(?:WITH\s+\S+\s+)?BY|=)\s*')" + $ph + "(')"
+    $anzahl = ([regex]::Matches($Sql, $muster)).Count
+    # Ersatztext als Zeichenkette statt Delegat: das erzeugte Passwort ist per
+    # Konstruktion alphanumerisch, es kann darin also kein $-Verweis stecken.
+    $neu = [regex]::Replace($Sql, $muster, ('${1}' + $NewPassword + '${2}'))
+    return [pscustomobject]@{ Text = $neu; Anzahl = $anzahl }
 }
 
 <#
@@ -773,11 +929,23 @@ function Test-MySqlRoot {
 function Invoke-MySqlScriptFile {
     param(
         [Parameter(Mandatory)][string]$Password,
-        [Parameter(Mandatory)]$Entry     # @{ Datei; Anzeige; Datenbank }
+        [Parameter(Mandatory)]$Entry,    # @{ Datei; Anzeige; Datenbank }
+        $Project = $null                # fuer die Passwort-Ersetzung
     )
     if (-not (Test-Path -LiteralPath $Entry.Datei)) { throw "SQL-Datei nicht gefunden: $($Entry.Datei)" }
     $sql = Get-Content -LiteralPath $Entry.Datei -Raw -Encoding UTF8
     if ([string]::IsNullOrWhiteSpace($sql)) { Write-Log "$($Entry.Anzeige): Datei ist leer - übersprungen." 'Warn'; return }
+
+    # Platzhalter durch das erzeugte Passwort ersetzen - nur beim Hauptbenutzer.
+    $db = if ($Project) { $Project.Datenbank } else { $null }
+    if ($db -and $db.Benutzer -and $script:ProjPassword) {
+        $e = Set-SqlUserPassword -Sql $sql -User $db.Benutzer `
+                                 -Placeholder $db.Platzhalter -NewPassword $script:ProjPassword
+        if ($e.Anzahl -gt 0) {
+            $sql = $e.Text
+            Write-Log ("{0}: Passwort fuer '{1}' eingesetzt ({2}x)." -f $Entry.Anzeige, $db.Benutzer, $e.Anzahl) 'Info'
+        }
+    }
 
     $dbInfo = if ($Entry.Datenbank) { " (Datenbank: $($Entry.Datenbank))" } else { '' }
     Write-Log ("Führe aus: {0}{1}" -f $Entry.Anzeige, $dbInfo) 'Info'
@@ -903,6 +1071,12 @@ function Get-StepPlan {
     if ($Project.ConfigFiles.Count -gt 0) {
         $steps.Add(@{ Key = 'cfg'; Title = 'Konfigurationsdateien vorbereiten'; Entry = $null })
     }
+    # Setup-Skripte zuletzt: sie richten Aufgaben ein, die Datenbank und
+    # Konfiguration bereits brauchen. Abgewaehlte werden uebersprungen.
+    foreach ($s in $Project.Skripte) {
+        if (-not $s.Gewaehlt) { continue }
+        $steps.Add(@{ Key = 'ps1'; Title = "Skript: $($s.Titel)"; Entry = $s })
+    }
     return $steps.ToArray()
 }
 
@@ -917,6 +1091,68 @@ function Set-StepState {
         'Failed'  { $item.Text = [char]0x2717; $item.ForeColor = [System.Drawing.Color]::FromArgb(196, 43, 28) }  # ✗
     }
     Invoke-UiPump
+}
+
+<#
+ Fuehrt ein Setup-Skript des Projekts aus (Windows-Aufgaben einrichten).
+
+ Uebergeben wird nur, was das Skript auch deklariert - die Projekte sind
+ nicht voellig einheitlich: Olafs Skripte kennen kein -Unbeaufsichtigt,
+ Norberts Kamera-Proxy kein -PhpExe. Get-Command liest dafuer den param()-
+ Block, ohne den Rumpf auszufuehren.
+
+ Rueckgabecodes der Projekt-Skripte:
+   0 = eingerichtet          2 = Administrator-Rechte fehlen
+   1 = unerwarteter Fehler   3 = Projektordner nicht bestimmbar
+ Zusaetzlich gelten die Windows-Installer-Erfolgscodes 3010 (Neustart
+ noetig) und 1641 (Neustart eingeleitet) als Erfolg - msiexec liefert sie,
+ wenn ein Skript IIS-Module nachinstalliert.
+#>
+function Invoke-ProjectScript {
+    param([Parameter(Mandatory)]$Project, [Parameter(Mandatory)]$Entry)
+
+    if (-not (Test-Path -LiteralPath $Entry.Datei)) {
+        throw "Setup-Skript nicht gefunden: $($Entry.Datei)"
+    }
+
+    $erlaubt = @()
+    try {
+        $cmd = Get-Command -Name $Entry.Datei -CommandType ExternalScript -ErrorAction Stop
+        $erlaubt = @($cmd.Parameters.Keys)
+    } catch {
+        # Nicht lesbar: dann nur den Pfad uebergeben statt zu raten
+        Write-Log ("Parameter von {0} nicht lesbar ({1}) - Skript wird ohne Argumente gestartet." -f $Entry.Anzeige, $_.Exception.Message) 'Warn'
+    }
+
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $argumente = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $Entry.Datei + '"'))
+    if ($erlaubt -contains 'ProjektPfad')     { $argumente += @('-ProjektPfad', ('"' + $Project.Dir + '"')) }
+    if ($erlaubt -contains 'Unbeaufsichtigt') { $argumente += '-Unbeaufsichtigt' }
+    if ($erlaubt -contains 'PhpExe'    -and $script:PhpExe)    { $argumente += @('-PhpExe',    ('"' + $script:PhpExe + '"')) }
+    if ($erlaubt -contains 'PythonExe' -and $script:PythonExe) { $argumente += @('-PythonExe', ('"' + $script:PythonExe + '"')) }
+
+    Write-Log ("Starte Skript: {0}" -f $Entry.Anzeige) 'Info'
+    $r = Invoke-ExeCapture -FilePath $ps -ArgumentList $argumente -TimeoutSec 900
+
+    foreach ($zeile in @($r.Lines | Select-Object -First 20)) { Write-Log ("  " + $zeile) 'Info' }
+
+    $neustart = $false
+    switch ($r.ExitCode) {
+        0     { $text = 'eingerichtet' }
+        3010  { $text = 'eingerichtet - Neustart erforderlich'; $neustart = $true }
+        1641  { $text = 'eingerichtet - Neustart wurde eingeleitet'; $neustart = $true }
+        2     { $text = 'Administrator-Rechte fehlen' }
+        3     { $text = 'Projektordner nicht bestimmbar' }
+        1     { $text = 'Fehler im Skript - siehe Protokoll' }
+        default { $text = "unerwarteter Rueckgabewert $($r.ExitCode) - siehe Protokoll" }
+    }
+    $ok = ($r.ExitCode -eq 0 -or $neustart)
+    if (-not $ok) {
+        $letzte = @($r.Lines | Where-Object { $_ -match 'FEHLER|Error' } | Select-Object -Last 1)
+        if ($letzte) { $text = $text + ': ' + $letzte[0].Trim() }
+    }
+    Write-Log ("{0}: {1}" -f $Entry.Titel, $text) $(if ($ok) { 'Ok' } else { 'Error' })
+    return [pscustomobject]@{ Ok = $ok; Text = $text; Neustart = $neustart; ExitCode = $r.ExitCode }
 }
 
 <#
@@ -943,6 +1179,21 @@ function Initialize-ConfigFiles {
             try {
                 [System.IO.File]::Copy($tpl, $target, $false)
                 Write-Log ("Aus Vorlage erstellt: {0}  (Quelle: {1})" -f $target, [System.IO.Path]::GetFileName($tpl)) 'Ok'
+                # Erzeugtes Passwort eintragen. Anders als beim SQL wird hier jedes
+                # Vorkommen ersetzt: die Konfiguration gehoert genau einem Projekt
+                # und enthaelt nur dessen eigene Zugangsdaten.
+                $db = $Project.Datenbank
+                if ($db -and $script:ProjPassword -and $db.Platzhalter) {
+                    $utf8   = New-Object System.Text.UTF8Encoding($false)
+                    $inhalt = [System.IO.File]::ReadAllText($target, [System.Text.Encoding]::UTF8)
+                    $treffer = ([regex]::Matches($inhalt, [regex]::Escape($db.Platzhalter))).Count
+                    if ($treffer -gt 0) {
+                        [System.IO.File]::WriteAllText($target, $inhalt.Replace($db.Platzhalter, $script:ProjPassword), $utf8)
+                        Write-Log ("Passwort in {0} eingetragen ({1}x)." -f [System.IO.Path]::GetFileName($target), $treffer) 'Ok'
+                    } else {
+                        Write-Log ("In {0} stand kein Platzhalter '{1}' - Passwort bitte von Hand eintragen." -f [System.IO.Path]::GetFileName($target), $db.Platzhalter) 'Warn'
+                    }
+                }
             } catch [System.IO.IOException] {
                 Write-Log ("Konfig war bereits vorhanden, Vorlage nicht kopiert: {0}" -f $target) 'Warn'
             } catch {
@@ -974,10 +1225,28 @@ function Invoke-ProjectInstall {
         SqlResults = @()
         Name       = $p.Name
         Datenbank  = $p.Datenbank
+        SkriptResults = @()
+        Passwort      = $null
+        PasswortNeu   = $false
+        CredDatei     = $null
+        Neustart      = $false
+    }
+
+    # Passwort einmal je Installation festlegen: entweder aus einer frueheren
+    # Installation uebernommen oder frisch erzeugt. Beides landet in der Ablage,
+    # damit eine Neuinstallation denselben Wert wiederverwenden kann.
+    $script:ProjPassword = $null
+    if ($p.Datenbank -and $p.Datenbank.Benutzer) {
+        $pwInfo = Resolve-ProjectPassword -Project $p
+        $script:ProjPassword       = $pwInfo.Passwort
+        $script:Result.Passwort    = $pwInfo.Passwort
+        $script:Result.PasswortNeu = $pwInfo.Neu
     }
     $plan       = Get-StepPlan $p
-    $sqlResults = New-Object System.Collections.Generic.List[object]
-    $failed     = New-Object System.Collections.Generic.List[string]
+    $sqlResults    = New-Object System.Collections.Generic.List[object]
+    $failed        = New-Object System.Collections.Generic.List[string]
+    $skriptResults = New-Object System.Collections.Generic.List[object]
+    $skriptFehler  = New-Object System.Collections.Generic.List[string]
     $i = 0
     try {
         Set-Busy $true
@@ -995,7 +1264,7 @@ function Invoke-ProjectInstall {
                 }
                 'sql' {
                     try {
-                        Invoke-MySqlScriptFile -Password $pw -Entry $step.Entry
+                        Invoke-MySqlScriptFile -Password $pw -Entry $step.Entry -Project $p
                         $sqlResults.Add(@{ Anzeige = $step.Entry.Anzeige; Ok = $true; Text = 'ausgeführt' })
                         Set-StepState $i 'Done'
                     } catch {
@@ -1011,22 +1280,52 @@ function Invoke-ProjectInstall {
                     $script:Result.Configs = @(Initialize-ConfigFiles $p)
                     Set-StepState $i 'Done'
                 }
+                'ps1' {
+                    # Ein fehlgeschlagenes Skript beendet die Installation nicht -
+                    # wie bei SQL sieht man am Ende, was steht und was nicht.
+                    try {
+                        $sr = Invoke-ProjectScript -Project $p -Entry $step.Entry
+                        $skriptResults.Add(@{ Anzeige = $step.Entry.Titel; Ok = $sr.Ok; Text = $sr.Text })
+                        if ($sr.Neustart) { $script:Result.Neustart = $true }
+                        if ($sr.Ok) { Set-StepState $i 'Done' }
+                        else { $skriptFehler.Add($step.Entry.Titel); Set-StepState $i 'Failed' }
+                    } catch {
+                        $msg = $_.Exception.Message
+                        $skriptResults.Add(@{ Anzeige = $step.Entry.Titel; Ok = $false; Text = $msg })
+                        $skriptFehler.Add($step.Entry.Titel)
+                        Write-Log $msg 'Error'
+                        Set-StepState $i 'Failed'
+                    }
+                }
             }
         }
 
-        $script:Result.SqlResults = $sqlResults.ToArray()
+        $script:Result.SqlResults    = $sqlResults.ToArray()
+        $script:Result.SkriptResults = $skriptResults.ToArray()
         if ($failed.Count -gt 0) {
             $script:Result.Error = ("{0} von {1} SQL-Skripten fehlgeschlagen: {2}. Einzelheiten in der Schrittliste und im Protokoll." -f `
                 $failed.Count, @($p.Sql).Count, ($failed -join ', '))
             Write-Log ("=== Installation '{0}' mit Fehlern beendet ===" -f $p.Name) 'Error'
             return $false
         }
+        # Fehlgeschlagene Setup-Skripte halten die Installation nicht auf:
+        # Website, Datenbank und Konfiguration stehen, und die Zugangsdaten
+        # auf der Seite "Fertig" braucht der Anwender in jedem Fall. Die
+        # Fehler stehen dort in einer eigenen Liste und im Protokoll.
+        if ($skriptFehler.Count -gt 0) {
+            Write-Log (("{0} Setup-Skript(e) fehlgeschlagen: {1}" -f $skriptFehler.Count, ($skriptFehler -join ', '))) 'Warn'
+        }
+        # Passwort erst jetzt ablegen - vorher ist nicht sicher, dass es gilt.
+        if ($script:ProjPassword) {
+            $script:Result.CredDatei = Save-ProjectCredentials -Project $p -Password $script:ProjPassword
+        }
         $script:Result.Success = $true
         Write-Log ("=== Installation '{0}' abgeschlossen ===" -f $p.Name) 'Ok'
         return $true
     } catch {
         Set-StepState $i 'Failed'
-        $script:Result.SqlResults = $sqlResults.ToArray()
+        $script:Result.SqlResults    = $sqlResults.ToArray()
+        $script:Result.SkriptResults = $skriptResults.ToArray()
         $script:Result.Error = $_.Exception.Message
         Write-Log $_.Exception.Message 'Error'
         return $false
@@ -1261,6 +1560,35 @@ $script:BtnTestDb = New-Ctl System.Windows.Forms.Button $grpDb 540 24 170 27 'Ve
 $script:LblPwSource = New-Label $grpDb 130 54 ($pw - 150) 18 '' $script:ColGray
 $script:LblDbTest   = New-Label $grpDb 130 76 ($pw - 150) 20 '' $script:ColGray
 
+# Auswahl der Setup-Skripte. Nur sichtbar, wenn das Projekt welche hat -
+# die Seite wird dafuer in Load-CheckPage neu angeordnet. Pflichtskripte
+# stehen mit gesetztem Haken drin und lassen sich nicht abwaehlen.
+$script:GrpSkripte = New-Object System.Windows.Forms.GroupBox
+$script:GrpSkripte.Text     = ' Setup-Skripte '
+$script:GrpSkripte.Location = New-Object System.Drawing.Point(0, 148)
+$script:GrpSkripte.Size     = New-Object System.Drawing.Size($pw, 92)
+$script:GrpSkripte.Anchor   = 'Top,Left,Right'
+$script:GrpSkripte.Visible  = $false
+$script:PnlCheck.Controls.Add($script:GrpSkripte)
+
+$script:ClbSkripte = New-Object System.Windows.Forms.CheckedListBox
+$script:ClbSkripte.Location      = New-Object System.Drawing.Point(12, 20)
+$script:ClbSkripte.Size          = New-Object System.Drawing.Size(($pw - 24), 64)
+$script:ClbSkripte.Anchor        = 'Top,Left,Right'
+$script:ClbSkripte.CheckOnClick  = $true
+$script:ClbSkripte.BorderStyle   = 'None'
+$script:ClbSkripte.IntegralHeight = $false
+$script:GrpSkripte.Controls.Add($script:ClbSkripte)
+
+# Pflichtskripte duerfen nicht abgewaehlt werden - der Haken springt zurueck.
+$script:ClbSkripte.Add_ItemCheck({
+    param($sender, $e)
+    $eintrag = $script:SkriptAuswahl[$e.Index]
+    if (-not $eintrag.Optional -and $e.NewValue -ne 'Checked') {
+        $e.NewValue = 'Checked'
+    }
+})
+
 $script:LblCheckHint = New-Label $script:PnlCheck 0 ($ph - 66) $pw 60 '' $script:ColGray
 $script:LblCheckHint.Anchor = 'Left,Right,Bottom'
 
@@ -1283,6 +1611,30 @@ function Load-CheckPage {
     }
     $script:LvCheck.EndUpdate()
     $script:CheckOk = $res.Ok
+
+    # Setup-Skripte anbieten. Pflichtskripte stehen fest angehakt in derselben
+    # Liste, damit der Anwender sieht, was ohnehin laeuft.
+    $script:SkriptAuswahl = @($p.Skripte)
+    $hatSkripte = ($script:SkriptAuswahl.Count -gt 0)
+    $script:GrpSkripte.Visible = $hatSkripte
+    if ($hatSkripte) {
+        $script:ClbSkripte.BeginUpdate()
+        $script:ClbSkripte.Items.Clear()
+        foreach ($s in $script:SkriptAuswahl) {
+            $text = if ($s.Optional) { $s.Titel } else { $s.Titel + '   (immer)' }
+            [void]$script:ClbSkripte.Items.Add($text, [bool]$s.Gewaehlt)
+        }
+        $script:ClbSkripte.EndUpdate()
+        # Seite umbauen: die Pruefliste wird kuerzer, darunter die Skripte.
+        $script:LvCheck.Height    = 100
+        $script:GrpSkripte.Top    = 148
+        $script:ChkReplace.Top    = 246
+        $grpDb.Top                = 274
+    } else {
+        $script:LvCheck.Height    = 176
+        $script:ChkReplace.Top    = 226
+        $grpDb.Top                = 256
+    }
 
     # Ersetzen-Kästchen nur anbieten, wenn es etwas zu ersetzen gibt
     $exists = (@(Get-IisSites | Where-Object { $_.Name -eq $p.Name }).Count -gt 0)
@@ -1384,6 +1736,21 @@ $script:LvSqlRes.FullRowSelect = $true
 [void]$script:LvSqlRes.Columns.Add('Ergebnis', $pw - 34 - 300 - 8)
 $script:PnlFinish.Controls.Add($script:LvSqlRes)
 
+# Ergebnis der Setup-Skripte: eine Zeile je Skript mit Haekchen oder Kreuz.
+$script:LblSkriptRes = New-Label $script:PnlFinish 0 80 $pw 22 'Setup-Skripte' $script:ColDark $fontBig
+$script:LvSkriptRes = New-Object System.Windows.Forms.ListView
+$script:LvSkriptRes.Location      = New-Object System.Drawing.Point(0, 106)
+$script:LvSkriptRes.Size          = New-Object System.Drawing.Size($pw, 80)
+$script:LvSkriptRes.Anchor        = 'Top,Left,Right'
+$script:LvSkriptRes.View          = 'Details'
+$script:LvSkriptRes.FullRowSelect = $true
+$script:LvSkriptRes.HeaderStyle   = 'None'
+$script:LvSkriptRes.Font          = $fontSym
+[void]$script:LvSkriptRes.Columns.Add(' ', 34)
+[void]$script:LvSkriptRes.Columns.Add('Skript', 300)
+[void]$script:LvSkriptRes.Columns.Add('Ergebnis', $pw - 34 - 300 - 8)
+$script:PnlFinish.Controls.Add($script:LvSkriptRes)
+
 # Datenbank-Zugangsdaten: was in die Konfigurationsdatei des Projekts gehoert.
 # Werte in fester Schrift (leichter abzutippen), Zusatzhinweis darunter in der
 # normalen Schrift - dessen Hoehe wird gemessen, damit nichts abgeschnitten wird.
@@ -1460,6 +1827,32 @@ function Load-FinishPage {
         $script:LvSqlRes.Visible  = $false
     }
 
+    # Setup-Skripte: gleiche Darstellung wie die SQL-Liste darueber
+    $skrRes = @($r.SkriptResults)
+    if ($skrRes.Count -gt 0) {
+        $script:LblSkriptRes.Visible = $true
+        $script:LvSkriptRes.Visible  = $true
+        $script:LblSkriptRes.Top = $y
+        $script:LvSkriptRes.Top  = $y + 26
+        $script:LvSkriptRes.BeginUpdate()
+        $script:LvSkriptRes.Items.Clear()
+        foreach ($e in $skrRes) {
+            $sym = if ($e.Ok) { [char]0x2713 } else { [char]0x2717 }
+            $item = New-Object System.Windows.Forms.ListViewItem([string]$sym)
+            [void]$item.SubItems.Add($e.Anzeige)
+            [void]$item.SubItems.Add($e.Text)
+            $item.ForeColor = if ($e.Ok) { $script:ColOk } else { $script:ColErr }
+            $item.UseItemStyleForSubItems = $true
+            [void]$script:LvSkriptRes.Items.Add($item)
+        }
+        $script:LvSkriptRes.EndUpdate()
+        $script:LvSkriptRes.Height = [math]::Min(100, ($skrRes.Count * 22) + 8)
+        $y = $script:LvSkriptRes.Top + $script:LvSkriptRes.Height + 14
+    } else {
+        $script:LblSkriptRes.Visible = $false
+        $script:LvSkriptRes.Visible  = $false
+    }
+
     # Datenbank-Zugangsdaten anzeigen - nur wenn die Installation geklappt hat
     # und in der JSON etwas hinterlegt ist. Die Werte stammen aus den
     # SQL-Skripten des Projekts; genau sie gehoeren in dessen Konfigurationsdatei.
@@ -1468,7 +1861,9 @@ function Load-FinishPage {
         $lines = New-Object System.Collections.Generic.List[string]
         if ($db.Name)     { $lines.Add(("Datenbank :  {0}" -f $db.Name)) }
         if ($db.Benutzer) { $lines.Add(("Benutzer  :  {0}" -f $db.Benutzer)) }
-        if ($db.Passwort) { $lines.Add(("Passwort  :  {0}" -f $db.Passwort)) }
+        # Das erzeugte Passwort hat Vorrang vor dem Platzhalter aus der JSON.
+        $pwAnzeige = if ($r.Passwort) { $r.Passwort } else { $db.Passwort }
+        if ($pwAnzeige) { $lines.Add(("Passwort  :  {0}" -f $pwAnzeige)) }
 
         $script:LblDbHead.Visible = $true
         $script:LblDbInfo.Visible = $true
@@ -1478,15 +1873,30 @@ function Load-FinishPage {
         $script:LblDbInfo.Height = ($lines.Count * 17) + 4
         $y = $script:LblDbInfo.Top + $script:LblDbInfo.Height
 
-        if ($db.Hinweis) {
+        # Hinweistext zusammensetzen: Herkunft des Passworts, Ablageort und
+        # der projektspezifische Zusatz aus der JSON (z. B. Nebenbenutzer).
+        $notiz = New-Object System.Collections.Generic.List[string]
+        if ($r.Passwort) {
+            $notiz.Add($(if ($r.PasswortNeu) {
+                'Dieses Passwort wurde bei der Installation erzeugt und in die Konfigurationsdatei eingetragen.'
+            } else {
+                'Dieses Passwort stammt aus einer frueheren Installation dieses Projekts und wurde wiederverwendet.'
+            }))
+        }
+        if ($r.CredDatei) { $notiz.Add('Hinterlegt in: ' + $r.CredDatei) }
+        if ($db.Hinweis)  { $notiz.Add([string]$db.Hinweis) }
+        if ($r.Neustart)  { $notiz.Add('Ein Setup-Skript meldet: Windows muss neu gestartet werden, damit alles vollstaendig greift.') }
+        $hinweisText = ($notiz -join ' ')
+
+        if ($hinweisText) {
             # Hoehe messen statt schaetzen - der Hinweis ist oft mehrzeilig.
             $prop = New-Object System.Drawing.Size($pw, 0)
             $size = [System.Windows.Forms.TextRenderer]::MeasureText(
-                        [string]$db.Hinweis, $script:LblDbNote.Font, $prop,
+                        $hinweisText, $script:LblDbNote.Font, $prop,
                         [System.Windows.Forms.TextFormatFlags]::WordBreak)
             $script:LblDbNote.Visible = $true
             $script:LblDbNote.Top     = $y + 6
-            $script:LblDbNote.Text    = [string]$db.Hinweis
+            $script:LblDbNote.Text    = $hinweisText
             $script:LblDbNote.Height  = $size.Height + 4
             $y = $script:LblDbNote.Top + $script:LblDbNote.Height
         } else {
@@ -1589,6 +1999,13 @@ function Start-Install {
     }
     $sqlText = if ($p.Sql.Count -gt 0) { "`nSQL-Skripte: $($p.Sql.Count)" } else { "`nSQL-Skripte: keine" }
     if (-not (Show-Confirm ("Projekt '{0}' wird eingerichtet:`n`nWebsite:  {0} (Port {1})`nPfad:     {2}{3}`n`nJetzt starten?" -f $p.Name, $p.Port, $p.DocRoot, $sqlText) 'Installation starten')) { return }
+
+    # Haken aus der Liste in die Projektdaten uebernehmen
+    if ($script:SkriptAuswahl) {
+        for ($k = 0; $k -lt $script:SkriptAuswahl.Count; $k++) {
+            $script:SkriptAuswahl[$k].Gewaehlt = $script:ClbSkripte.GetItemChecked($k)
+        }
+    }
 
     Show-Page 'install'
     Load-InstallPage

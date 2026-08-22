@@ -121,6 +121,8 @@ Baut mit [PS2EXE](https://github.com/MScholtes/PS2EXE) eine einzelne `Projekt-In
 |---|---|
 | `Projekt-Installer.ps1` | der Installer selbst |
 | `projekte.json` | Projektliste – die echten Projekte; fehlt sie, legt der Installer per Schaltfläche eine Vorlage an |
+
+Erzeugte Datenbank-Passwörter liegen unter `C:\ProgramData\PHP-IIS-Setup\projekt-zugangsdaten\<ordner>.txt`. Bei einer erneuten Installation desselben Projekts wird das Passwort von dort gelesen, damit Datenbank und Konfigurationsdatei zusammenpassen, wenn nur eine der beiden Seiten neu aufgesetzt wurde. Ersetzt wird nur das Passwort des Hauptbenutzers – Nebenbenutzer wie `norbert_lesen` behalten den Platzhalter aus dem SQL-Skript und sollten von Hand geändert werden.
 | `Build-Projekt-Installer.ps1` | erzeugt die verteilbare EXE (PS2EXE) |
 | `New-Icon.ps1` | wandelt ein PNG in eine `.ico` für die EXE |
 

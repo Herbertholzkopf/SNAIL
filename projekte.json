@@ -1,14 +1,16 @@
 {
-  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard. sql: einfacher Pfad oder { datei, datenbank }. konfigDateien: einfacher Pfad oder { datei, vorlage } - fehlt die Datei, wird sie bei der Installation aus der Vorlage kopiert; ohne Angabe werden <datei>.example, <datei>.dist und config.example.php-Muster automatisch gesucht. skripte: PowerShell-Dateien fuer die Windows-Aufgabenplanung - NOCH NICHT IMPLEMENTIERT, die Felder sind bereits hinterlegt (siehe _skripteDoku). datenbank: Zugangsdaten, die am Ende der Installation angezeigt werden.",
+  "_doku": "Projektliste fuer den Projekt-Installer. Diese Datei liegt neben der EXE und wird beim Start gelesen. Platzhalter in setupUrl und konfigDateien: {port} {name} {ordner}. Icon: PNG als Base64, Einzeiler: [Convert]::ToBase64String([IO.File]::ReadAllBytes('logo.png')) | Set-Clipboard. sql: einfacher Pfad oder { datei, datenbank }. konfigDateien: einfacher Pfad oder { datei, vorlage } - fehlt die Datei, wird sie bei der Installation aus der Vorlage kopiert; ohne Angabe werden <datei>.example, <datei>.dist und config.example.php-Muster automatisch gesucht. skripte: PowerShell-Dateien fuer die Windows-Aufgabenplanung (siehe _skripteDoku). datenbank: Zugangsdaten, die am Ende der Installation angezeigt werden. Das Feld passwort ist der Platzhalter aus den SQL-Dateien; bei der Installation wird daraus ein zufaelliges Passwort - aber nur fuer den Hauptbenutzer (benutzer). Nebenbenutzer wie norbert_lesen behalten den Platzhalter. Abweichender Platzhalter: passwortPlatzhalter. Erzeugte Passwoerter liegen unter C:\\ProgramData\\PHP-IIS-Setup\\projekt-zugangsdaten und werden bei einer erneuten Installation von dort wieder gelesen.",
 
-  "_skripteDoku": "Geplant, noch ohne Wirkung im Installer. Je Eintrag: datei (relativ zum Projektordner), titel (Anzeige), beschreibung (Erklaerung fuer den Anwender), optional (false = laeuft immer, true = Anwender waehlt aus), vorausgewaehlt (nur bei optional=true: Haekchen anfangs gesetzt?), alsAdmin (Skript braucht erhoehte Rechte). Alle Skripte legen Windows-Aufgaben an und sind mehrfach ausfuehrbar.",
+  "_skripteDoku": "Je Eintrag: datei (relativ zum Projektordner), titel (Anzeige), beschreibung (Erklaerung fuer den Anwender), optional (false = laeuft immer, true = Anwender waehlt aus), vorausgewaehlt (nur bei optional=true: Haekchen anfangs gesetzt?), alsAdmin (nur dokumentarisch - der Installer laeuft ohnehin erhoeht, die Skripte erben das). Der Installer uebergibt -ProjektPfad, -Unbeaufsichtigt sowie -PhpExe/-PythonExe, aber nur die Parameter, die das jeweilige Skript auch deklariert. Rueckgabe: 0 = eingerichtet, 1 = Fehler, 2 = Rechte fehlen, 3 = Projektordner unklar; 3010 und 1641 gelten als Erfolg mit Neustart-Hinweis. Alle Skripte legen Windows-Aufgaben an und sind mehrfach ausfuehrbar.",
 
   "_geplanteProjekte": "Gisela (App zum Tracken von Arbeitszeiten beim Kunden) und Manfred sind als Repository angelegt, enthalten aber bisher nur eine README - keine Datenbank, keine Konfiguration, kein Code. Sobald dort etwas existiert, werden sie hier als regulaere Projekte ergaenzt.",
 
   "einstellungen": {
     "wwwroot":   "C:\\inetpub\\wwwroot",
     "mysqlBin":  "",
-    "mysqlPort": 3306
+    "mysqlPort": 3306,
+    "phpExe":    "",
+    "pythonExe": ""
   },
 
   "projekte": [
