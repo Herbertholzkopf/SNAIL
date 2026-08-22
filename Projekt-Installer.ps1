@@ -952,7 +952,22 @@ function Invoke-MySqlScriptFile {
     $r = Invoke-MySql -Password $Password -Sql $sql -Database $Entry.Datenbank
     if ($r.ExitCode -ne 0) {
         $err = ($r.Error.Trim() -split "`r?`n" | Select-Object -First 3) -join ' | '
-        throw "Fehler in $($Entry.Anzeige): $err"
+        # mysql bricht bei der ersten fehlerhaften Anweisung ab (kein --force).
+        # Nennt die Meldung eine Zeilennummer, wurde alles danach nicht mehr
+        # ausgefuehrt - ohne diesen Zusatz sieht die Fehlermeldung nach einem
+        # Einzelproblem aus, obwohl das halbe Schema fehlen kann.
+        $zusatz = ''
+        if ($err -match '(?i)\bat line\s+(\d+)') {
+            $gesamt = 0
+            try { $gesamt = @(Get-Content -LiteralPath $Entry.Datei).Count } catch { }
+            $rest = $gesamt - [int]$Matches[1]
+            if ($rest -gt 0) {
+                $zusatz = " - die Datei wurde ab Zeile $($Matches[1]) nicht weiter ausgefuehrt, $rest Zeilen blieben offen."
+            } else {
+                $zusatz = " - die Datei wurde ab Zeile $($Matches[1]) nicht weiter ausgefuehrt."
+            }
+        }
+        throw "Fehler in $($Entry.Anzeige): $err$zusatz"
     }
     # mysql schreibt Warnungen nach stderr, auch bei Exitcode 0
     if ($r.Error.Trim().Length -gt 0) {
