@@ -263,7 +263,18 @@ function Invoke-ExeCapture {
         $errTask = $proc.StandardError.ReadToEndAsync()
         $outTask = $proc.StandardOutput.ReadToEndAsync()
         if ($null -ne $StdIn) {
-            $proc.StandardInput.Write($StdIn)
+            # UTF-8 ohne BOM direkt in den BaseStream schreiben statt ueber den
+            # StreamWriter: der kodiert unter Windows PowerShell (.NET Framework)
+            # in der ANSI-Codepage, wodurch Umlaute in SQL-Dateien als Fragezeichen
+            # oder Ersatzzeichen in der Datenbank landen. ProcessStartInfo hat dafuer
+            # zwar StandardInputEncoding, das gibt es aber erst ab .NET Core 2.1 -
+            # unter 5.1 wuerde schon das Setzen der Eigenschaft eine Ausnahme werfen.
+            # Ueber den BaseStream geht es auf beiden Laufzeiten und umgeht jede
+            # Umkodierung. mysql.exe bekommt das passende --default-character-set.
+            $enc   = New-Object System.Text.UTF8Encoding($false)
+            $bytes = $enc.GetBytes($StdIn)
+            $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+            $proc.StandardInput.BaseStream.Flush()
             $proc.StandardInput.Close()
         }
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
