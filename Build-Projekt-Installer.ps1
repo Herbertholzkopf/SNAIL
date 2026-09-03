@@ -8,7 +8,7 @@
 [CmdletBinding()]
 param(
     [string]$IconFile = 'setup.ico',
-    [string]$Version  = '1.0.0.0'
+    [string]$Version  = '2.0.0.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,7 +43,7 @@ $params = @{
     x64          = $true
     version      = $Version
     title        = (Get-SafeMetaText 'Projekt-Installer')
-    description  = (Get-SafeMetaText 'Richtet IIS-Website und Datenbank fuer ein Projekt ein')
+    description  = (Get-SafeMetaText 'Richtet ein Projekt auf Basis der Projektvorlage ein (IIS, MySQL, .env, Konsole)')
     company      = (Get-SafeMetaText 'Intern')
     product      = (Get-SafeMetaText 'Projekt-Installer')
     copyright    = (Get-SafeMetaText ('(c) ' + (Get-Date).Year))
