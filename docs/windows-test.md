@@ -3,7 +3,7 @@
 Was sich unter Linux prüfen ließ, ist geprüft (Parser, PSScriptAnalyzer und `tests/SNAIL.Tests.ps1`:
 Katalog, Eingaben, Ports, Datenpfade, `config.php` gegen die echte `config.example.php`,
 `services.json` gegen `ServiceDirectory::parse()` der Vorlage, Erkennung der Installationen über
-`php bin\console info`, psql-Schritte gegen PostgreSQL 16, Durchlauf ZIP → `config.php` → `migrate`
+`php bin\console info`, Kollisionen von Datenbank/Rolle und Ordnername, psql-Schritte gegen PostgreSQL 16, Durchlauf ZIP → `config.php` → `migrate`
 → `user:create` → `check`). Hier steht, was nur Windows zeigen kann: Oberfläche, appcmd, icacls,
 robocopy, Firewall, Windows-Aufgabe, `windows-pruefung.ps1` unter 5.1, WIPP-Dateien.
 
@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.1“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.2“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -119,7 +119,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 |---|---|---|
 | 7.1 | Neuinstallation Projektvorlage, Mandant `abbruch`, Port-Vorschlag; sobald „PostgreSQL: Rolle und Datenbank“ läuft: Fenster schließen (X) → „Nein“ | läuft weiter |
 | 7.2 | Erneut X → „Ja“ | laufender Schritt wird fertig, Protokoll „Abbruch angefordert …“, „Abgebrochen auf Wunsch … - beim nächsten Lauf geht es dort weiter“, „=== … abgebrochen ===“ – beide Zeilen als Warnung, nicht Fehler, Fenster schließt; `config.php` gibt es noch nicht |
-| 7.3 | SNAIL starten | „projekt-abbruch“ steht **nicht** oben (keine `config.php`); Katalog → Mandant `abbruch` → Kasten `projekt-abbruch`; Prüfen: Datenbank „(vorhanden) / Rolle (vorhanden) - Passwort der Rolle wird neu gesetzt“, Port-Vorschlag = Port der schon angelegten Website `projekt-abbruch` mit grünem „frei“; Website „gibt es schon … wird angeglichen, Bindings bleiben“; ✓ Port – **kein** „von Windows reserviert“ (HTTP.sys trägt den Port der laufenden Website in die excludedportrange ein) |
+| 7.3 | SNAIL starten | „projekt-abbruch“ steht **nicht** oben (keine `config.php`); Katalog → Mandant `abbruch` → Kasten `projekt-abbruch`; Prüfen: ✓ Datenbank „(vorhanden) / Rolle (vorhanden) - Fortsetzen nach Abbruch (laut Zugangsdatei dieses Ordners), Passwort der Rolle wird neu gesetzt“ – **kein** Kasten „Vorhandene Datenbank“, kein Häkchen nötig; Port-Vorschlag = Port der schon angelegten Website `projekt-abbruch` mit grünem „frei“; Website „gibt es schon … wird angeglichen, Bindings bleiben“; ✓ Port – **kein** „von Windows reserviert“ (HTTP.sys trägt den Port der laufenden Website in die excludedportrange ein) |
 | 7.4 | „Installieren“ (ohne die Website vorher anzuhalten) | alle Schritte ✓, `check` grün |
 | 7.5 | Fehler nach der `config.php`: ZIP nach `C:\AK\projekt-fehler` entpacken (Inhalt von `projektvorlage-main` direkt), `database\migrations\9999_kaputt.sql` mit `SELECT kaputt(;` anlegen; Neuinstallation Mandant `fehler` mit „Vorhandenen Programmordner nutzen“ | config.php ✓, `migrate` ✗ rot, Fehlertext nennt die Ursache („… [FEHLER] Migration 9999_kaputt.sql fehlgeschlagen …“, nicht „^“), „Erneut versuchen“ aktiv |
 | 7.6 | `9999_kaputt.sql` löschen → „Erneut versuchen“ | Protokoll „Datenbank projekt_fehler, Rolle projekt_fehler_user, Passwort aus der vorhandenen config.php.“; alle Schritte ✓, die Schrittliste links zeigt dabei **alle** Schritte mit Status |
@@ -127,6 +127,21 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 | 7.8 | „Details“: Temp auf ein anderes Laufwerk als Data legen bzw. Data in `C:\AK\projekt-x\daten` | ✗ „paths.temp … muss auf demselben Laufwerk liegen …“ bzw. „… liegt im Programmordner …“ |
 | 7.8a | Abbruch **nach** der config.php: Neuinstallation Mandant `spaet`, Name „Spät GmbH“, während `user:create` bzw. `services.json` X → „Ja“; SNAIL neu starten | oben „Projektvorlage - Spät GmbH“ (Name aus der Zugangsdatei, nicht der Schlüssel); Wiederholen → `services.json` enthält `"name": "Spät GmbH"` |
 | 7.9 | Katalog `projekte.json` im alten Format (Projektliste mit MySQL) neben das Skript legen → „Neu einlesen“ | „Diese projekte.json hat das alte Format …“; Installationen oben werden trotzdem angezeigt. Datei zurück |
+
+## 7a Datenbank-Kollision
+
+Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Mandant `kol_a` ergeben beide `projekt_kol_a` / `projekt_kol_a_user`.
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 7a.1 | Neuinstallation Projektvorlage, Mandant `kol-a` → installieren | Ordner `projekt-kol-a`, Datenbank `projekt_kol_a`, alle Schritte ✓ |
+| 7a.2 | Neuinstallation Projektvorlage, Mandant `kol_a` → „Weiter“ | Kasten `projekt-kol_a`, Datenbank `projekt_kol_a`; Prüfen: ✗ Datenbank „Datenbank 'projekt_kol_a' und Rolle 'projekt_kol_a_user' gehören zur Installation projekt-kol-a (projekt/kol-a).“, **kein** Kasten „Vorhandene Datenbank“, „Installieren“ grau |
+| 7a.3 | `projekt-kol-a` von Hand entfernen: im IIS-Manager Website und App-Pool `projekt-kol-a` löschen, Ordner `C:\AK\projekt-kol-a` und die Aufgabe `\AK\projekt-kol-a Aufgabenplanung` löschen (Datenordner, Datenbank und Zugangsdatei bleiben). SNAIL neu starten, Neuinstallation Mandant `kol_a` | Prüfen: ⚠ Datenbank „… (vorhanden) / Rolle … (vorhanden) - gehört zu keiner erkannten Installation …“; Kasten „Vorhandene Datenbank“ mit Häkchen „Vorhandene Datenbank 'projekt_kol_a' übernehmen (alte Daten bleiben erhalten)“, nicht gesetzt; Hinweis unten nennt das Häkchen; „Installieren“ **grau** |
+| 7a.4 | Häkchen setzen, dann „Erneut prüfen“ | mit Häkchen wird „Installieren“ aktiv; nach „Erneut prüfen“ ist das Häkchen wieder leer und „Installieren“ grau |
+| 7a.5 | Häkchen setzen → „Installieren“ | Bestätigung nennt „Datenbank: VORHANDENE wird übernommen (alte Daten bleiben erhalten)“; Protokoll ⚠ „Vorhandene Datenbank wird übernommen (projekt_kol_a / Rolle projekt_kol_a_user): vom Anwender bestätigt …“; alle Schritte ✓, Administrator „Benutzer 'admin' war bereits vorhanden“ (Konto aus der alten Datenbank), `check` grün; Fertig-Seite zeigt **kein** neues Initialpasswort |
+| 7a.6 | Gleicher Ordner nach Entfernen von Hand: `projekt-kol_a` wie in 7a.3 entfernen (Zugangsdatei `C:\ProgramData\SNAIL\zugangsdaten\projekt-kol_a.txt` **liegen lassen**), Neuinstallation Mandant `kol_a` | ⚠ mit Häkchen wie 7a.3 – **nicht** „Fortsetzen nach Abbruch“ (der Programmordner fehlt bzw. ist neuer als die Zugangsdatei) |
+| 7a.7 | Zurück, Mandant `kol-x`; vorher `$appcmd add apppool /name:projekt-kol-x` | Prüfen: ✗ App-Pool „'projekt-kol-x' gibt es schon, ohne Website und Programmordner …“. Danach `$appcmd delete apppool projekt-kol-x` |
+| 7a.8 | Aufräumen: `projekt-kol_a` wie in 7a.3 entfernen; `& "$pg\psql.exe" -U postgres -c "DROP DATABASE projekt_kol_a;"`, danach genauso `DROP ROLE projekt_kol_a_user;` (Passwort bei der Abfrage eingeben), Zugangsdateien `projekt-kol-a.txt`/`projekt-kol_a.txt` löschen | – |
 
 ## 8 Server ohne D:
 
@@ -149,7 +164,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.1.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.2.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## Ergebnis festhalten

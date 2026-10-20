@@ -158,7 +158,21 @@ Geschrieben wird **UTF-8 ohne BOM** (`[IO.File]::WriteAllText` mit `UTF8Encoding
 | Übergabe | SQL über die **Standardeingabe** an `psql -f -`; das Superuser-Passwort steht nur in einer temporären **pgpass-Datei** (ACL nur Administratoren/SYSTEM, `PGPASSFILE` nur für den Kindprozess, sofort gelöscht). Nie auf der Kommandozeile |
 | Rolle | `CREATE ROLE <benutzer> LOGIN PASSWORD '…'` – das Passwort geht als **SCRAM-SHA-256-Hash** zum Server (wie bei WIPP). Rolle vorhanden → `ALTER ROLE … PASSWORD` mit dem Passwort der vorhandenen `config.php` (bzw. dem neuen, das gleich hineingeschrieben wird) |
 | Datenbank | `CREATE DATABASE <name> OWNER <benutzer> ENCODING 'UTF8' TEMPLATE template0`. Vorhanden mit richtigem Eigentümer → nichts zu tun; mit anderem → Fehler auf „Prüfen“ |
+| Vorhanden bei einer Neuinstallation | wird **nie stillschweigend** übernommen (siehe unten) |
 | Passwort | 24 Zeichen aus Buchstaben und Ziffern (ohne Verwechsler) |
+
+**Kollisionen bei einer Neuinstallation.** Datenbank- und Rollenname folgen aus dem Ordner (`-` → `_`), deshalb können zwei Ordner dieselben Namen ergeben (`olaf-muster` und `olaf_muster` → `olaf_muster` / `olaf_muster_user`), und nach einer von Hand entfernten Installation bleibt ihre Datenbank oft liegen. „Prüfen“ gleicht deshalb ab, sobald es Datenbank **oder** Rolle schon gibt bzw. eine Installation sie nutzt:
+
+| Lage | Ergebnis |
+|---|---|
+| Eine erkannte Installation (`db.name`/`db.user` aus `php bin\console info`) nutzt die Datenbank oder Rolle – auch wenn es sie gerade nicht gibt | ✗ „Datenbank/Rolle '<name>' gehört zur Installation <Ordner> (<dienst>/<mandant>).“ |
+| Datenbank gehört einer anderen Rolle | ✗ wie bisher |
+| Fortsetzen eines abgebrochenen Laufs **desselben** Ordners: Programmordner da (ohne `config.php`), die Zugangsdatei `zugangsdaten\<Ordner>.txt` nennt dieselbe Datenbank und Rolle und ist nicht älter als der Programmordner | ✓ ohne Rückfrage, Passwort der Rolle wird neu gesetzt. Eine alte Zugangsdatei einer von Hand entfernten Installation ist älter als der neu angelegte Ordner und zählt nicht |
+| Vorhanden, aber keiner erkannten Installation zugeordnet | ⚠ und Pflicht-Häkchen „Vorhandene Datenbank übernehmen (alte Daten bleiben erhalten)“ (nur Rolle: „Vorhandene Rolle … übernehmen“). Ohne Häkchen bleibt „Installieren“ grau; erst damit `ALTER ROLE` und Weiterverwendung, im Protokoll als Warnung vermerkt. Nicht lesbare Installationen werden in der Meldung genannt |
+
+Der Schritt „PostgreSQL: Rolle und Datenbank“ prüft das bei einer Neuinstallation noch einmal und bricht ab, ohne etwas zu ändern, wenn inzwischen etwas vorhanden ist, das weder bestätigt noch als Fortsetzen erkannt wurde.
+
+Genauso für den **Ordnernamen** (zugleich Site und App-Pool), der ebenfalls zusammenfallen kann (Dienst `olaf` + Mandant `a-b` und Dienst `olaf-a` + Mandant `b` → `olaf-a-b`): Gehört der Ordner einer erkannten Installation, zeigt eine gleichnamige Website woandershin, nutzt eine andere Website den gleichnamigen App-Pool oder gibt es den App-Pool ohne Website und ohne Programmordner → ✗ auf „Prüfen“.
 
 ## services.json
 
@@ -241,7 +255,8 @@ Unter Linux geprüft (PowerShell 7, PHP 8.3, PostgreSQL 16): Parser und PSScript
 - Installationen am Server: zwei Mandanten, `config.php` mit BOM, Ordner ohne `config.php`/`bin\console`, älterer Stand ohne `db` in `info`, ausgetauschter Katalog
 - `services.json`: neu, angleichen, fremde Einträge/Felder/Reihenfolge, Ein-Element-Liste und BOM, Regelverstöße – und Lesen mit `ServiceDirectory::parse()` der Vorlage
 - ZIP mit einfachem und doppeltem Zwischenordner
-- PostgreSQL: Superuser über pgpass (Passwort mit `:` und `\`), Rolle + Datenbank anlegen und wiederholen, Anmeldung mit dem SCRAM-Hash, fremder Eigentümer, Benutzerzahl
+- Kollisionen: Namensgleichheit `olaf`/`muster` gegen `olaf_muster`, Rolle einer anderen Installation, Rest-Datenbank (Häkchen, nur Rolle, nicht lesbare Installation), Fortsetzen nach Abbruch (Zugangsdatei passend, älter, anderer Name, ohne Ordner), Ordnername `olaf` + `a-b` gegen `olaf-a` + `b`, fremde Website, fremder und verwaister App-Pool
+- PostgreSQL: Superuser über pgpass (Passwort mit `:` und `\`), Rolle + Datenbank anlegen und wiederholen, Anmeldung mit dem SCRAM-Hash, fremder Eigentümer, Benutzerzahl; Rest-Datenbank: Sperre ohne Häkchen, Übernahme mit (alte Daten mit neuem Passwort lesbar), Fortsetzen ohne
 - Durchlauf: Rolle/Datenbank → `config.php` → `migrate` → `user:create` (Umlaute im Namen) → `services.json` (url angleichen) → `check` mit Exit 0 → Erkennung am Server über `info` → Sicherung nach `<Datenordner>\Sicherung`
 
 ```sh

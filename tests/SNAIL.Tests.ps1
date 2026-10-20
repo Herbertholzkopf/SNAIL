@@ -195,6 +195,78 @@ Test-Case 'Test-FirstOrdnerFree: config.php oder fremde Website belegen <dienst>
     [System.IO.File]::WriteAllText((Join-Path $root 'olaf/config.php'), '<?php return [];')
     Assert (-not (Test-FirstOrdnerFree -ServiceKey 'olaf' -ProgRoot $root).Free) 'config.php'
 }
+Test-Case 'Get-DbCollision: Namensgleichheit olaf/muster gegen olaf_muster, Rest, Fortsetzen, fremder Eigentuemer' {
+    # "-" -> "_": Ordner olaf-muster und olaf_muster ergeben dieselben Namen
+    $a = Get-DefaultDbNames 'olaf-muster'; $b = Get-DefaultDbNames 'olaf_muster'
+    Assert-Equal $b.Name $a.Name; Assert-Equal $b.User $a.User
+    $inst = @([pscustomobject]@{ Ordner = 'olaf_muster'; ServiceKey = 'olaf_muster'; Key = 'standard'; Error = ''
+                                 Db = [pscustomobject]@{ Name = 'olaf_muster'; User = 'olaf_muster_user' } })
+    $beide = [pscustomobject]@{ RoleExists = $true; DbExists = $true; DbOwner = 'olaf_muster_user' }
+    $nichts = [pscustomobject]@{ RoleExists = $false; DbExists = $false; DbOwner = '' }
+    $c = Get-DbCollision -State $beide -DbName $a.Name -Role $a.User -Instances $inst
+    Assert-Equal 'Error' $c.Level
+    Assert-Equal "Datenbank 'olaf_muster' und Rolle 'olaf_muster_user' gehören zur Installation olaf_muster (olaf_muster/standard)." $c.Text
+    Assert (-not $c.Adopt) 'kein Uebernehmen bei fremder Installation'
+    # auch wenn es die Datenbank (noch) nicht gibt: die andere Installation ist darauf eingerichtet
+    Assert-Equal 'Error' (Get-DbCollision -State $nichts -DbName $a.Name -Role $a.User -Instances $inst).Level
+    # nur die Rolle gehoert einer anderen Installation; Fortsetzen hilft dagegen nicht
+    $c = Get-DbCollision -State $beide -DbName 'olaf_x' -Role 'olaf_muster_user' -Instances $inst -Resume $true
+    Assert-Equal 'Error' $c.Level; Assert ($c.Text -like "Rolle 'olaf_muster_user' gehört zur Installation olaf_muster *") $c.Text
+    # frei
+    $c = Get-DbCollision -State $nichts -DbName 'olaf_neu' -Role 'olaf_neu_user' -Instances $inst
+    Assert-Equal 'Ok' $c.Level; Assert (-not $c.Adopt); Assert ($c.Text -match 'wird angelegt') $c.Text
+    # Rest einer entfernten Installation: Warnung mit Pflicht-Haekchen
+    $rest = [pscustomobject]@{ RoleExists = $true; DbExists = $true; DbOwner = 'olaf_alt_user' }
+    $c = Get-DbCollision -State $rest -DbName 'olaf_alt' -Role 'olaf_alt_user' -Instances $inst
+    Assert-Equal 'Warn' $c.Level; Assert $c.Adopt; Assert (-not $c.Resume)
+    Assert-Equal "Vorhandene Datenbank 'olaf_alt' übernehmen (alte Daten bleiben erhalten)" $c.Confirm
+    $c = Get-DbCollision -State ([pscustomobject]@{ RoleExists = $true; DbExists = $false; DbOwner = '' }) -DbName 'olaf_alt' -Role 'olaf_alt_user'
+    Assert $c.Adopt 'nur Rolle vorhanden'; Assert ($c.Confirm -match "Rolle 'olaf_alt_user'") $c.Confirm
+    $kaputt = @($inst[0], [pscustomobject]@{ Ordner = 'olaf-kaputt'; Error = 'php bin\console info: x'; Db = $null })
+    $c = Get-DbCollision -State $rest -DbName 'olaf_alt' -Role 'olaf_alt_user' -Instances $kaputt
+    Assert ($c.Adopt -and $c.Text -match 'Nicht lesbar: olaf-kaputt') $c.Text
+    # Fortsetzen nach Abbruch desselben Ordners: ohne Haekchen
+    $c = Get-DbCollision -State $rest -DbName 'olaf_alt' -Role 'olaf_alt_user' -Instances $inst -Resume $true
+    Assert-Equal 'Ok' $c.Level; Assert ($c.Resume -and -not $c.Adopt)
+    # Datenbank gehoert einer anderen Rolle
+    $c = Get-DbCollision -State ([pscustomobject]@{ RoleExists = $false; DbExists = $true; DbOwner = 'fremd' }) -DbName 'olaf_alt' -Role 'olaf_alt_user' -Resume $true
+    Assert-Equal 'Error' $c.Level; Assert ($c.Text -match "Eigentümer ist 'fremd'") $c.Text
+}
+Test-Case 'Test-ResumeRun: Zugangsdatei desselben Ordners - passend, aelter als der Programmordner, anderer Name, ohne Ordner' {
+    $cred = Join-Path $tmp 'resume/zugangsdaten'
+    $prog = Join-Path $tmp 'resume/AK/olaf-muster'
+    New-Item -ItemType Directory -Path $cred, $prog -Force | Out-Null
+    $f = Join-Path $cred 'olaf-muster.txt'
+    Assert (-not (Test-ResumeRun -CredFile $f -ProgDir $prog -DbName 'olaf_muster' -Role 'olaf_muster_user')) 'ohne Zugangsdatei'
+    [System.IO.File]::WriteAllText($f, "# x`r`ndb_name=olaf_muster`r`ndb_benutzer=olaf_muster_user`r`ndb_passwort=a=b`r`n")
+    Assert (Test-ResumeRun -CredFile $f -ProgDir $prog -DbName 'olaf_muster' -Role 'olaf_muster_user') 'Abbruch nach dem Schritt Datenbank'
+    Assert (-not (Test-ResumeRun -CredFile $f -ProgDir $prog -DbName 'olaf_muster' -Role 'andere_user')) 'andere Rolle'
+    Assert (-not (Test-ResumeRun -CredFile $f -ProgDir $prog -DbName 'olaf' -Role 'olaf_muster_user')) 'anderer DB-Name'
+    Assert (-not (Test-ResumeRun -CredFile $f -ProgDir (Join-Path $tmp 'resume/AK/fehlt') -DbName 'olaf_muster' -Role 'olaf_muster_user')) 'ohne Programmordner (von Hand entfernt)'
+    # Zugangsdatei einer frueher von Hand entfernten Installation: aelter als der neue Programmordner
+    (Get-Item $f).LastWriteTimeUtc = (Get-Item $prog).CreationTimeUtc.AddDays(-30)
+    Assert (-not (Test-ResumeRun -CredFile $f -ProgDir $prog -DbName 'olaf_muster' -Role 'olaf_muster_user')) 'alte Zugangsdatei'
+}
+Test-Case 'Ordnername: olaf + a-b gegen olaf-a + b; Get-IisNameConflicts (fremde Site, fremder/verwaister Pool, Fortsetzen)' {
+    $inst = @([pscustomobject]@{ ServiceKey = 'olaf'; Key = 'x'; Ordner = 'olaf' }, [pscustomobject]@{ ServiceKey = 'olaf-a'; Key = 'y'; Ordner = 'olaf-a' })
+    $o1 = (Resolve-Ordner -ServiceKey 'olaf' -InstKey 'a-b' -Instances $inst).Name
+    $o2 = (Resolve-Ordner -ServiceKey 'olaf-a' -InstKey 'b' -Instances $inst).Name
+    Assert-Equal 'olaf-a-b' $o1; Assert-Equal $o1 $o2 'gleicher Ordner'
+    Assert-Equal 'olaf-a-b (olaf/a-b)' (Format-InstanceRef ([pscustomobject]@{ Ordner = 'olaf-a-b'; ServiceKey = 'olaf'; Key = 'a-b'; Error = '' }))
+    Assert-Equal 'olaf-a-b (nicht lesbar)' (Format-InstanceRef ([pscustomobject]@{ Ordner = 'olaf-a-b'; Error = 'x' }))
+    $prog = Join-Path $tmp 'AKn/olaf-a-b'
+    $pub = Join-Path $prog 'public'
+    Assert-Equal 0 @(Get-IisNameConflicts -Ordner 'olaf-a-b' -ProgDir $prog).Count 'nichts vorhanden'
+    $r = @(Get-IisNameConflicts -Ordner 'olaf-a-b' -ProgDir $prog -SiteExists $true -SitePath 'C:\inetpub\olaf' -PoolExists $true -PoolApps @('olaf-a-b/'))
+    Assert-Equal 'Website' (($r | ForEach-Object Name) -join ','); Assert ($r[0].Text -match 'inetpub') $r[0].Text
+    $r = @(Get-IisNameConflicts -Ordner 'olaf-a-b' -ProgDir $prog -PoolExists $true -PoolApps @('Default Web Site/', 'Default Web Site/x', 'OLAF-A-B/'))
+    Assert-Equal 1 $r.Count; Assert-Equal 'App-Pool' $r[0].Name; Assert ($r[0].Text -match 'von Default Web Site genutzt') $r[0].Text
+    $r = @(Get-IisNameConflicts -Ordner 'olaf-a-b' -ProgDir $prog -PoolExists $true)
+    Assert ($r.Count -eq 1 -and $r[0].Text -match 'ohne Website und Programmordner') 'verwaister Pool'
+    # abgebrochener Lauf: Programmordner bzw. eigene Website da, Pool leer oder nur von ihr genutzt
+    Assert-Equal 0 @(Get-IisNameConflicts -Ordner 'olaf-a-b' -ProgDir $prog -PoolExists $true -ProgDirExists $true).Count
+    Assert-Equal 0 @(Get-IisNameConflicts -Ordner 'olaf-a-b' -ProgDir $prog -SiteExists $true -SitePath $pub.ToUpper() -PoolExists $true -PoolApps @('olaf-a-b/')).Count
+}
 Test-Case 'Test-DataPaths: absolut, nicht im Programmordner, Temp und Data auf einem Laufwerk' {
     $ja = { param($p) $null -ne $p }
     $ok = Test-DataPaths -Paths (Get-DefaultPaths 'D:\AK\projekt') -ProgDir 'C:\AK\projekt' -DriveTest $ja
@@ -551,6 +623,42 @@ if (-not $PgPassword) {
         Assert $threw 'fremder Eigentuemer -> Fehler'
         Invoke-Psql -Pg $pg -Password $PgPassword -Sql 'DROP ROLE IF EXISTS postgres_x;' | Out-Null
         Assert-Equal -1 (Get-UserCount -Pg $pg -Password $PgPassword -DbName $db) 'ohne Tabelle users'
+    }
+    Test-Case 'Rest-Datenbank: Pruefung verlangt Haekchen, Sperre ohne, Uebernahme mit (Daten bleiben), Fortsetzen ohne' {
+        $rdb = "snailtest_${suffix}_rest"; $rrole = "snailtest_${suffix}_rest_user"
+        try {
+            Assert-DbNotExisting -Pg $pg -Password $PgPassword -DbName $rdb -Role $rrole   # nichts da: kein Fehler
+            # Rest einer von Hand entfernten Installation, mit Daten
+            $alt = New-RandomPassword
+            New-ProjectDatabase -Pg $pg -Password $PgPassword -DbName $rdb -Role $rrole -DbPassword $alt
+            Invoke-Psql -Pg $pg -Password $PgPassword -Database $rdb -Sql "CREATE TABLE alt (x int); INSERT INTO alt VALUES (42); ALTER TABLE alt OWNER TO ""$rrole"";" | Out-Null
+            $s = Get-PgObjectState -Pg $pg -Password $PgPassword -DbName $rdb -Role $rrole
+            $c = Get-DbCollision -State $s -DbName $rdb -Role $rrole -Instances @()
+            Assert ($c.Level -eq 'Warn' -and $c.Adopt) 'ohne Haekchen keine Installation'
+            # ohne Haekchen: der Schritt Datenbank bricht ab, bevor etwas geaendert wird
+            $threw = $false
+            try { Assert-DbNotExisting -Pg $pg -Password $PgPassword -DbName $rdb -Role $rrole } catch { $threw = $_.Exception.Message -match "Datenbank '$rdb' und Rolle '$rrole' gibt es schon" }
+            Assert $threw 'Sperre ohne Haekchen'
+            # mit Haekchen: ALTER ROLE, Datenbank bleibt mit ihren Daten
+            $neu = New-RandomPassword
+            New-ProjectDatabase -Pg $pg -Password $PgPassword -DbName $rdb -Role $rrole -DbPassword $neu
+            $env:PGPASSWORD = $neu
+            $wert = & (Join-Path $PgBin 'psql') -X -w -h 127.0.0.1 -p $PgPort -U $rrole -d $rdb -tAc 'SELECT x FROM alt;' 2>&1
+            $code = $LASTEXITCODE
+            Remove-Item Env:PGPASSWORD
+            Assert ($code -eq 0 -and "$wert".Trim() -eq '42') "alte Daten mit neuem Passwort lesbar: $code $wert"
+            # Fortsetzen nach Abbruch desselben Ordners: Zugangsdatei nach dem Programmordner geschrieben
+            $prog = Join-Path $tmp 'rest/AK/rest'
+            New-Item -ItemType Directory -Path $prog -Force | Out-Null
+            $cf = Join-Path $tmp 'rest/rest.txt'
+            [System.IO.File]::WriteAllText($cf, "db_name=$rdb`r`ndb_benutzer=$rrole`r`n")
+            $res = Test-ResumeRun -CredFile $cf -ProgDir $prog -DbName $rdb -Role $rrole
+            $c = Get-DbCollision -State $s -DbName $rdb -Role $rrole -Instances @() -Resume $res
+            Assert ($c.Level -eq 'Ok' -and $c.Resume -and -not $c.Adopt) ($c | ConvertTo-Json -Compress)
+        } finally {
+            Invoke-Psql -Pg $pg -Password $PgPassword -Sql "DROP DATABASE IF EXISTS ""$rdb"";" -NoThrow | Out-Null
+            Invoke-Psql -Pg $pg -Password $PgPassword -Sql "DROP ROLE IF EXISTS ""$rrole"";" -NoThrow | Out-Null
+        }
     }
 
     Write-Host "`n== Durchlauf mit der Vorlage (ZIP -> config.php -> migrate -> user:create -> services.json -> check)"
