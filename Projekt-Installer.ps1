@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.1
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.2
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.3+, IIS, PostgreSQL, config.php) auf einem Windows Server, der vorher
@@ -129,7 +129,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.1'
+$script:AppVersion = '7.2'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -1207,6 +1207,13 @@ function Test-AppPoolExists {
     return (@($r.Lines | Where-Object { $_ -match '^APPPOOL\s+"' }).Count -gt 0)
 }
 
+# Anwendungen, die einen App-Pool nutzen (z. B. "olaf/", "Default Web Site/")
+function Get-AppPoolApps {
+    param([Parameter(Mandatory)][string]$Name)
+    $r = Invoke-AppCmd @('list', 'app', "/apppool.name:$Name")
+    return @($r.Lines | ForEach-Object { if ($_ -match '^APP\s+"([^"]+)"') { $Matches[1] } })
+}
+
 function Test-TcpPortInUse {
     param([Parameter(Mandatory)][int]$Port)
     try {
@@ -1893,6 +1900,22 @@ function New-ProjectDatabase {
     }
 }
 
+<#
+ Sperre im Schritt "Datenbank" einer Neuinstallation: Gibt es Datenbank oder
+ Rolle schon, wird sie nur uebernommen, wenn die Pruefung das als Fortsetzen
+ desselben Ordners erkannt oder der Anwender das Uebernehmen bestaetigt hat.
+#>
+function Assert-DbNotExisting {
+    param([Parameter(Mandatory)]$Pg, [Parameter(Mandatory)][string]$Password, [Parameter(Mandatory)][string]$DbName, [Parameter(Mandatory)][string]$Role)
+    $s = Get-PgObjectState -Pg $Pg -Password $Password -DbName $DbName -Role $Role
+    if ($s.DbExists -or $s.RoleExists) {
+        $what = @()
+        if ($s.DbExists) { $what += "Datenbank '$DbName'" }
+        if ($s.RoleExists) { $what += "Rolle '$Role'" }
+        throw ("{0} gibt es schon - übernommen wird nur nach Bestätigung auf der Seite ""Prüfen"" (Zurück, erneut prüfen)." -f ($what -join ' und '))
+    }
+}
+
 function Format-Size {
     param([long]$Bytes)
     if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
@@ -2024,17 +2047,19 @@ function ConvertTo-Megabytes {
  "php bin\console <Befehl>" im Programmordner. Zeilen mit einem Passwort
  (user:create: "Initiales Passwort: ...") kommen nicht ins Protokoll.
 #>
+# -ExitCodeChecked: einen Exit-Code ungleich 0 wertet der Aufrufer aus (z. B.
+# user:create bei vorhandenem Benutzer) - dann keine Error-Zeile im Protokoll
 function Invoke-Console {
-    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSec = 600)
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSec = 600, [switch]$ExitCodeChecked)
     $console = Join-Path (Join-Path $Plan.ProgDir 'bin') 'console'
     if (-not (Test-Path -LiteralPath $console)) { throw "Projekt-Konsole nicht gefunden: $console" }
     Write-Log ("php bin\console {0}" -f ($Arguments -join ' '))
     $r = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs (@($console) + $Arguments)) -WorkingDirectory $Plan.ProgDir -Utf8Output -TimeoutSec $TimeoutSec
     foreach ($l in $r.Lines) {
         $shown = if ($l -match 'Passwort:\s*\S') { ($l -replace '(Passwort:\s*).*$', '$1********') } else { $l }
-        Write-Log ('  ' + $shown) $(if ($r.ExitCode -eq 0) { 'Info' } else { 'Warn' })
+        Write-Log ('  ' + $shown) $(if ($r.ExitCode -eq 0 -or $ExitCodeChecked) { 'Info' } else { 'Warn' })
     }
-    Write-Log ("Exit-Code {0}" -f $r.ExitCode) $(if ($r.ExitCode -eq 0) { 'Ok' } else { 'Error' })
+    Write-Log ("Exit-Code {0}" -f $r.ExitCode) $(if ($r.ExitCode -eq 0) { 'Ok' } elseif ($ExitCodeChecked) { 'Info' } else { 'Error' })
     return $r
 }
 
@@ -2065,7 +2090,7 @@ function Invoke-ConsoleUserCreate {
     $a = $Plan.Inst.Admin
     $cmdArgs = @('user:create', $a.Login, $a.Name, 'admin')
     if ($Email) { $cmdArgs += $Email }
-    $r = Invoke-Console -Plan $Plan -Arguments $cmdArgs -TimeoutSec 120
+    $r = Invoke-Console -Plan $Plan -Arguments $cmdArgs -TimeoutSec 120 -ExitCodeChecked
     $all = $r.Lines -join "`n"
     if ($r.ExitCode -eq 0) {
         if ($all -match 'Initiales Passwort:\s*(\S+)') {
@@ -2378,6 +2403,100 @@ function Get-InstalledInstances {
     return $list.ToArray()
 }
 
+# Kurzbezeichnung einer erkannten Installation fuer Meldungen: Ordner (dienst/mandant)
+function Format-InstanceRef {
+    param([Parameter(Mandatory)]$Instance)
+    if ($Instance.Error) { return "$($Instance.Ordner) (nicht lesbar)" }
+    return '{0} ({1}/{2})' -f $Instance.Ordner, $Instance.ServiceKey, $Instance.Key
+}
+
+<#
+ Fortsetzen eines abgebrochenen Laufs DESSELBEN Ordners: Der Programmordner
+ existiert (ohne config.php - sonst waere es eine erkannte Installation), die
+ Zugangsdatei <Ordner>.txt nennt dieselbe Datenbank und Rolle und ist nicht
+ aelter als der Programmordner. Die Datei schreibt der Schritt "Datenbank"
+ nach dem Anlegen; eine alte Datei einer von Hand entfernten Installation ist
+ aelter als der neu angelegte Programmordner und zaehlt deshalb nicht.
+#>
+function Test-ResumeRun {
+    param([Parameter(Mandatory)][string]$CredFile, [Parameter(Mandatory)][string]$ProgDir, [string]$DbName, [string]$Role)
+    if (-not (Test-Path -LiteralPath $ProgDir -PathType Container)) { return $false }
+    $kv = $null
+    try { $kv = Read-KeyValueFile -Path $CredFile } catch { $kv = $null }
+    if (-not $kv -or [string]$kv['db_name'] -cne $DbName -or [string]$kv['db_benutzer'] -cne $Role) { return $false }
+    return ((Get-Item -LiteralPath $CredFile).LastWriteTimeUtc -ge (Get-Item -LiteralPath $ProgDir).CreationTimeUtc)
+}
+
+<#
+ Datenbank und Rolle einer Neuinstallation gegen den Bestand abgleichen
+ (-State aus Get-PgObjectState, -Instances = erkannte Installationen mit
+ db.name/db.user aus "php bin\console info"):
+   Error        gehoert einer anderen Installation oder fremdem Eigentuemer
+   Ok           wird angelegt, oder Fortsetzen nach Abbruch (-Resume)
+   Warn + Adopt vorhanden, aber keiner erkannten Installation zugeordnet -
+                uebernommen wird nur mit Haekchen (Confirm = Text dafuer)
+#>
+function Get-DbCollision {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$DbName, [Parameter(Mandatory)][string]$Role, $Instances = @(), [bool]$Resume = $false)
+    $res = [pscustomobject]@{ Level = 'Ok'; Text = ''; Adopt = $false; Resume = $false; Confirm = '' }
+    foreach ($i in @($Instances)) {
+        if ($null -eq $i -or $null -eq $i.Db) { continue }
+        $hit = @()
+        if ($i.Db.Name -and $i.Db.Name -ieq $DbName) { $hit += "Datenbank '$DbName'" }
+        if ($i.Db.User -and $i.Db.User -ieq $Role) { $hit += "Rolle '$Role'" }
+        if ($hit.Count -gt 0) {
+            $res.Level = 'Error'
+            $res.Text = '{0} {1} zur Installation {2}.' -f ($hit -join ' und '), $(if ($hit.Count -gt 1) { 'gehören' } else { 'gehört' }), (Format-InstanceRef $i)
+            return $res
+        }
+    }
+    if ($State.DbExists -and $State.DbOwner -ne $Role) {
+        $res.Level = 'Error'
+        $res.Text = "'$DbName' gibt es schon, Eigentümer ist '$($State.DbOwner)' statt '$Role'."
+        return $res
+    }
+    $desc = "{0} ({1}) / Rolle {2} ({3})" -f $DbName, $(if ($State.DbExists) { 'vorhanden' } else { 'wird angelegt' }), $Role, $(if ($State.RoleExists) { 'vorhanden' } else { 'wird angelegt' })
+    if (-not $State.DbExists -and -not $State.RoleExists) { $res.Text = $desc; return $res }
+    if ($Resume) {
+        $res.Resume = $true
+        $res.Text = "$desc - Fortsetzen nach Abbruch (laut Zugangsdatei dieses Ordners), Passwort der Rolle wird neu gesetzt"
+        return $res
+    }
+    $res.Level = 'Warn'
+    $res.Adopt = $true
+    $unread = @($Instances | Where-Object { $_ -and $_.Error } | ForEach-Object { $_.Ordner })
+    $res.Text = "$desc - gehört zu keiner erkannten Installation (Rest einer entfernten Installation?). Übernehmen nur mit Häkchen unten: alte Daten bleiben erhalten, das Passwort der Rolle wird neu gesetzt." +
+        $(if ($unread.Count -gt 0) { " Nicht lesbar: $($unread -join ', ') - vorher prüfen, ob diese Installation die Datenbank nutzt." } else { '' })
+    $res.Confirm = if ($State.DbExists) { "Vorhandene Datenbank '$DbName' übernehmen (alte Daten bleiben erhalten)" } else { "Vorhandene Rolle '$Role' übernehmen (ihr Passwort wird neu gesetzt)" }
+    return $res
+}
+
+<#
+ Gehoeren eine vorhandene IIS-Website bzw. ein App-Pool namens <Ordner> zu
+ dieser Neuinstallation? Die Website muss auf <Programmordner>\public zeigen,
+ den App-Pool darf hoechstens diese Website nutzen; ein unbenutzter App-Pool
+ zaehlt nur, wenn Website oder Programmordner schon da sind (abgebrochener
+ Lauf). Liefert die Fehler als Liste (leer = in Ordnung).
+#>
+function Get-IisNameConflicts {
+    param([Parameter(Mandatory)][string]$Ordner, [Parameter(Mandatory)][string]$ProgDir, [bool]$SiteExists = $false, [string]$SitePath = '',
+          [bool]$PoolExists = $false, [string[]]$PoolApps = @(), [bool]$ProgDirExists = $false)
+    $res = @()
+    $docRoot = Join-Path $ProgDir 'public'
+    if ($SiteExists -and $SitePath -and $SitePath -ine $docRoot) {
+        $res += [pscustomobject]@{ Name = 'Website'; Text = "'$Ordner' gibt es schon und sie zeigt auf $SitePath - gehört nicht zu dieser Installation." }
+    }
+    if ($PoolExists) {
+        $foreign = @($PoolApps | ForEach-Object { ($_ -split '/', 2)[0] } | Where-Object { $_ -and $_ -ine $Ordner } | Sort-Object -Unique)
+        if ($foreign.Count -gt 0) {
+            $res += [pscustomobject]@{ Name = 'App-Pool'; Text = "'$Ordner' gibt es schon und wird von $($foreign -join ', ') genutzt - gehört nicht zu dieser Installation." }
+        } elseif (-not $SiteExists -and -not $ProgDirExists) {
+            $res += [pscustomobject]@{ Name = 'App-Pool'; Text = "'$Ordner' gibt es schon, ohne Website und Programmordner (Rest einer entfernten Installation?) - im IIS-Manager entfernen oder einen anderen Mandanten-Schlüssel wählen." }
+        }
+    }
+    return $res
+}
+
 <#
  Ist <dienst> als Ordnername frei? Nicht frei, wenn dort eine config.php
  liegt (eine Installation, die nicht zu diesem Dienst gehoert oder nicht
@@ -2543,6 +2662,7 @@ function Test-Installation {
         ProgDir = (Join-Path $progRoot $inst.Ordner); DataDir = $inst.DataDir; Paths = $inst.Paths; AclDataDirs = @()
         ServicesJson = $sj; Source = $null; PhpExe = $null; Pg = $null; DbName = $inst.DbName; DbUser = $inst.DbUser
         ExistingConfig = $null; Template = $null; InstalledVersion = ''; SkipBackup = $false; PythonExe = $null; BackupInfo = $null
+        DbResume = $false; DbAdoptNeeded = $false; DbAdoptText = ''; AdoptDb = $false
     }
     if (-not $isNew) { $plan.ProgDir = $inst.Instance.ProgDir }
 
@@ -2571,16 +2691,22 @@ function Test-Installation {
     $own = @($sites | Where-Object { $_.Name -ieq $plan.Ordner }) | Select-Object -First 1
     & $add 'Info' 'Name' ("{0}  ({1}) - Ordner, IIS-Site, App-Pool, Aufgabe '\AK\{0} Aufgabenplanung'" -f $plan.Ordner, $inst.OrdnerReason)
     if ($isNew) {
-        if (Test-Path -LiteralPath (Join-Path $plan.ProgDir 'config.php')) {
+        $owner = @($script:Instances | Where-Object { $_ -and $_.Ordner -ieq $plan.Ordner }) | Select-Object -First 1
+        if ($owner) {
+            & $add 'Error' 'Name' "Ordner '$($plan.Ordner)' gehört zur Installation $(Format-InstanceRef $owner)."
+        } elseif (Test-Path -LiteralPath (Join-Path $plan.ProgDir 'config.php')) {
             & $add 'Error' 'Programmordner' "$($plan.ProgDir) enthält schon eine config.php (andere oder nicht lesbare Installation)."
         }
         $ownPort = 0
-        if ($own) {
-            $ownPath = Get-IisSitePath -Name $own.Name
-            $ownPort = Get-PortFromBindings $own.Bindings
-            if ($ownPath -and $ownPath -ine (Join-Path $plan.ProgDir 'public')) {
-                & $add 'Error' 'Website' "'$($own.Name)' gibt es schon und sie zeigt auf $ownPath."
-            } elseif ($ownPort -ne $inst.Port) {
+        $ownPath = ''
+        if ($own) { $ownPath = Get-IisSitePath -Name $own.Name; $ownPort = Get-PortFromBindings $own.Bindings }
+        $poolExists = $iis -and (Test-AppPoolExists -Name $plan.Ordner)
+        $poolApps = if ($poolExists) { @(Get-AppPoolApps -Name $plan.Ordner) } else { @() }
+        $conflicts = @(Get-IisNameConflicts -Ordner $plan.Ordner -ProgDir $plan.ProgDir -SiteExists ([bool]$own) -SitePath ([string]$ownPath) `
+            -PoolExists $poolExists -PoolApps $poolApps -ProgDirExists (Test-Path -LiteralPath $plan.ProgDir -PathType Container))
+        foreach ($c in $conflicts) { & $add 'Error' $c.Name $c.Text }
+        if ($own -and @($conflicts | Where-Object { $_.Name -eq 'Website' }).Count -eq 0) {
+            if ($ownPort -ne $inst.Port) {
                 & $add 'Error' 'Website' "'$($own.Name)' gibt es schon (Bindings $($own.Bindings)); SNAIL ändert keine Bindings - Port $ownPort eingeben oder die Website entfernen."
             } else {
                 & $add 'Warn' 'Website' "'$($own.Name)' gibt es schon (z. B. von einem abgebrochenen Lauf) - wird angeglichen, Bindings bleiben."
@@ -2727,11 +2853,19 @@ function Test-Installation {
     elseif ($pgOk) {
         try {
             $s = Get-PgObjectState -Pg $pg -Password $Password -DbName $plan.DbName -Role $plan.DbUser
-            if ($s.DbExists -and $s.DbOwner -ne $plan.DbUser) { & $add 'Error' 'Datenbank' "'$($plan.DbName)' gibt es schon, Eigentümer ist '$($s.DbOwner)' statt '$($plan.DbUser)'." }
+            if ($isNew) {
+                # Neuinstallation: vorhandene Datenbank/Rolle nie stillschweigend uebernehmen
+                $resume = Test-ResumeRun -CredFile (Join-Path $script:CredDir ($plan.Ordner + '.txt')) -ProgDir $plan.ProgDir -DbName $plan.DbName -Role $plan.DbUser
+                $c = Get-DbCollision -State $s -DbName $plan.DbName -Role $plan.DbUser -Instances $script:Instances -Resume $resume
+                $plan.DbResume = $c.Resume
+                $plan.DbAdoptNeeded = $c.Adopt
+                $plan.DbAdoptText = $c.Confirm
+                & $add $c.Level 'Datenbank' $c.Text
+            }
+            elseif ($s.DbExists -and $s.DbOwner -ne $plan.DbUser) { & $add 'Error' 'Datenbank' "'$($plan.DbName)' gibt es schon, Eigentümer ist '$($s.DbOwner)' statt '$($plan.DbUser)'." }
             elseif ($plan.Mode -eq 'update' -and -not $s.DbExists) { & $add 'Error' 'Datenbank' "'$($plan.DbName)' fehlt - Aktualisieren setzt die bestehende Datenbank voraus." }
             else {
                 $txt = "{0} ({1}) / Rolle {2} ({3})" -f $plan.DbName, $(if ($s.DbExists) { 'vorhanden' } else { 'wird angelegt' }), $plan.DbUser, $(if ($s.RoleExists) { 'vorhanden' } else { 'wird angelegt' })
-                if ($s.RoleExists -and $isNew) { $txt += ' - Passwort der Rolle wird neu gesetzt' }
                 & $add 'Ok' 'Datenbank' $txt
             }
         } catch { & $add 'Error' 'Datenbank' $_.Exception.Message }
@@ -2867,6 +3001,9 @@ function Invoke-Installation {
             $script:Result.BackupSkipped = $true
             Write-Log 'Sicherung übersprungen: Der Anwender hat bestätigt, dass eine andere funktionierende Sicherung besteht (z. B. Veeam/VM-Sicherung).' 'Warn'
         }
+        if ($Plan.Kind -eq 'new' -and $Plan.AdoptDb) {
+            Write-Log ("Vorhandene Datenbank wird übernommen ({0} / Rolle {1}): vom Anwender bestätigt, alte Daten bleiben erhalten." -f $Plan.DbName, $Plan.DbUser) 'Warn'
+        }
 
         # DB-Passwort: vorhandene config.php hat Vorrang, sonst neu. Bei jedem
         # Lauf frisch lesen (php -r, nie per Regex) - nach einem Abbruch hinter
@@ -2913,6 +3050,11 @@ function Invoke-Installation {
                     'acl'      { Set-ProjectAcls -Plan $Plan }
                     'firewall' { Set-ProjectFirewallRule -Plan $Plan }
                     'db' {
+                        if ($Plan.Kind -eq 'new' -and -not $Plan.DbResume -and -not $Plan.AdoptDb) {
+                            Assert-DbNotExisting -Pg $Plan.Pg -Password $Password -DbName $Plan.DbName -Role $Plan.DbUser
+                        }
+                        # ab hier gehoeren Datenbank und Rolle zu diesem Lauf ("Erneut versuchen")
+                        $Plan.DbResume = $true
                         New-ProjectDatabase -Pg $Plan.Pg -Password $Password -DbName $Plan.DbName -Role $Plan.DbUser -DbPassword $script:Result.Db.Password
                         $script:Result.CredFile = Save-InstallCredentials -Plan $Plan -Values @{
                             db_host = $Plan.Pg.Host; db_port = [string]$Plan.Pg.Port; db_name = $Plan.DbName
@@ -3096,17 +3238,38 @@ function New-ListBox {
     return $lv
 }
 
+# Text in Zeilen aufteilen, die hoechstens MaxWidth breit sind (Umbruch an
+# Leerzeichen; ein zu langes Wort bleibt ganz). -Measure liefert die Breite.
+function Split-TextToWidth {
+    param([string]$Text, [int]$MaxWidth, [Parameter(Mandatory)][scriptblock]$Measure)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $cur = ''
+    foreach ($w in ($Text -split ' ')) {
+        $try = if ($cur) { "$cur $w" } else { $w }
+        if ($cur -and (& $Measure $try) -gt $MaxWidth) { $lines.Add($cur); $cur = $w } else { $cur = $try }
+    }
+    $lines.Add($cur)
+    return , $lines.ToArray()
+}
+
+# Ergebniszeile; ein langer Text geht in Folgezeilen weiter (die Liste kann
+# nicht umbrechen, und der Tooltip ragt bei langen Texten aus dem Fenster)
 function Add-ResultRow {
     param($List, [string]$Level, [string]$Name, [string]$Text)
     $sym = switch ($Level) { 'Ok' { [char]0x2713 } 'Warn' { [char]0x26A0 } 'Error' { [char]0x2717 } default { [char]0x2139 } }
     $col = switch ($Level) { 'Ok' { $script:ColOk } 'Warn' { $script:ColWarn } 'Error' { $script:ColErr } default { $script:ColGray } }
-    $item = New-Object System.Windows.Forms.ListViewItem([string]$sym)
-    [void]$item.SubItems.Add($Name)
-    [void]$item.SubItems.Add($Text)
-    $item.ToolTipText = $Text
-    $item.ForeColor = $col
-    $item.UseItemStyleForSubItems = $true
-    [void]$List.Items.Add($item)
+    $font = $List.Font
+    $measure = { param($s) [System.Windows.Forms.TextRenderer]::MeasureText($s, $font).Width }.GetNewClosure()
+    $parts = Split-TextToWidth -Text $Text -MaxWidth ($List.Columns[2].Width - 12) -Measure $measure
+    for ($k = 0; $k -lt $parts.Count; $k++) {
+        $item = New-Object System.Windows.Forms.ListViewItem($(if ($k -eq 0) { [string]$sym } else { '' }))
+        [void]$item.SubItems.Add($(if ($k -eq 0) { $Name } else { '' }))
+        [void]$item.SubItems.Add($parts[$k])
+        $item.ToolTipText = $(if ($parts.Count -eq 1) { $Text } else { '' })   # umbrochen: alles sichtbar
+        $item.ForeColor = $col
+        $item.UseItemStyleForSubItems = $true
+        [void]$List.Items.Add($item)
+    }
 }
 
 # Beschriftung + Textfeld in einer Zeile
@@ -3543,6 +3706,18 @@ $script:PnlCheck.Controls.Add($script:GrpBackup)
 $script:ChkSkipBackup = New-Ctl System.Windows.Forms.CheckBox $script:GrpBackup 12 20 ($pw - 30) 22 'Sicherung überspringen (pg_dump und config.php)'
 $script:ChkBackupOk   = New-Ctl System.Windows.Forms.CheckBox $script:GrpBackup 30 44 ($pw - 50) 22 'Ich habe eine andere funktionierende Sicherung (z. B. Veeam/VM-Sicherung).'
 
+# gleicher Platz wie die Sicherung: die gibt es nur beim Aktualisieren, das
+# Uebernehmen einer vorhandenen Datenbank nur bei einer Neuinstallation
+$script:GrpAdopt = New-Object System.Windows.Forms.GroupBox
+$script:GrpAdopt.Text     = ' Vorhandene Datenbank '
+$script:GrpAdopt.Location = New-Object System.Drawing.Point(0, 364)
+$script:GrpAdopt.Size     = New-Object System.Drawing.Size($pw, 72)
+$script:GrpAdopt.Anchor   = 'Top,Left,Right'
+$script:GrpAdopt.Visible  = $false
+$script:PnlCheck.Controls.Add($script:GrpAdopt)
+$script:ChkAdoptDb = New-Ctl System.Windows.Forms.CheckBox $script:GrpAdopt 12 20 ($pw - 30) 22 'Vorhandene Datenbank übernehmen (alte Daten bleiben erhalten)'
+New-Label $script:GrpAdopt 30 46 ($pw - 50) 18 'Ohne Häkchen keine Installation. Sonst Datenbank und Rolle in PostgreSQL entfernen oder einen anderen Mandanten-Schlüssel wählen.' $script:ColGray | Out-Null
+
 $grpDb = New-Object System.Windows.Forms.GroupBox
 $grpDb.Text     = ' PostgreSQL (Superuser) '
 $grpDb.Location = New-Object System.Drawing.Point(0, 442)
@@ -3573,6 +3748,7 @@ function Initialize-CheckInputs {
     $script:ChkSkipBackup.Checked = $false
     $script:ChkBackupOk.Checked = $false
     $script:ChkBackupOk.Enabled = $false
+    $script:ChkAdoptDb.Checked = $false
     if ([string]::IsNullOrEmpty($script:TxtPgPw.Text)) {
         $saved = Get-SavedSuperuserPassword
         if ($saved) {
@@ -3609,9 +3785,16 @@ function Invoke-CheckPage {
     $isUpdate = ($res.Plan -and $res.Plan.Mode -eq 'update')
     $script:GrpBackup.Visible = $isUpdate
     if ($isUpdate -and $res.Plan.BackupInfo) { $script:GrpBackup.Text = " Sicherung vor dem Aktualisieren - $($res.Plan.BackupInfo.Text) " }
+    # das Haekchen gilt nur fuer genau dieses Pruefergebnis
+    $adopt = [bool]($res.Plan -and $res.Plan.DbAdoptNeeded)
+    $script:ChkAdoptDb.Checked = $false
+    if ($adopt) { $script:ChkAdoptDb.Text = $res.Plan.DbAdoptText }
+    $script:GrpAdopt.Visible = $adopt
     if ($res.Plan) { $script:RbExisting.Text = "Vorhandenen Programmordner nutzen: $($res.Plan.ProgDir)" + $(if ($t.Kind -eq 'installed') { ' (= Einrichtung wiederholen; ZIP = Aktualisieren)' } else { '' }) }
     $verb = if ($isUpdate) { 'Aktualisieren' } else { 'Installieren' }
-    $script:LblCheckHint.Text = if ($res.Ok) {
+    $script:LblCheckHint.Text = if ($res.Ok -and $adopt) {
+        'Datenbank bzw. Rolle gibt es schon (gelb markiert). "Installieren" erst nach dem Häkchen "übernehmen" - die alten Daten bleiben dann erhalten.'
+    } elseif ($res.Ok) {
         "Bereit. ""$verb"" führt die Schritte der Reihe nach aus; jeder Schritt ist wiederholbar. Eingaben geändert? Dann ""Erneut prüfen""."
     } else {
         'Rot markierte Punkte verhindern die Installation. Ursache beheben (Angaben mit "Zurück", Katalog mit "Neu einlesen") und "Erneut prüfen".'
@@ -3844,8 +4027,9 @@ function Update-NextState {
         'check' {
             $isUpdate = ($script:Plan -and $script:Plan.Mode -eq 'update')
             $backupOk = (-not $isUpdate) -or (-not $script:ChkSkipBackup.Checked) -or $script:ChkBackupOk.Checked
+            $adoptOk = (-not ($script:Plan -and $script:Plan.DbAdoptNeeded)) -or $script:ChkAdoptDb.Checked
             $script:BtnNext.Text    = if ($isUpdate) { 'Aktualisieren' } else { 'Installieren' }
-            $script:BtnNext.Enabled = [bool]$script:CheckOk -and $backupOk -and -not $script:Busy
+            $script:BtnNext.Enabled = [bool]$script:CheckOk -and $backupOk -and $adoptOk -and -not $script:Busy
             $script:BtnBack.Enabled = -not $script:Busy
         }
         'install' {
@@ -3883,8 +4067,11 @@ function Start-Install {
     if ($script:CurrentPage -eq 'check') {
         $plan.SkipBackup = ($plan.Mode -eq 'update' -and $script:ChkSkipBackup.Checked)
         if ($plan.SkipBackup -and -not $script:ChkBackupOk.Checked) { Show-Warn 'Sicherung überspringen nur mit Bestätigung einer anderen Sicherung.'; return }
+        $plan.AdoptDb = ($plan.DbAdoptNeeded -and $script:ChkAdoptDb.Checked)
+        if ($plan.DbAdoptNeeded -and -not $plan.AdoptDb) { Show-Warn 'Datenbank bzw. Rolle gibt es schon - installiert wird nur mit dem Häkchen "übernehmen".'; return }
         $was = switch ($plan.Mode) { 'update' { 'aktualisiert' } 'repeat' { 'erneut eingerichtet' } default { 'neu installiert' } }
         $sich = if ($plan.Mode -ne 'update') { '' } elseif ($plan.SkipBackup) { "`nSicherung: ÜBERSPRUNGEN (andere Sicherung bestätigt)" } else { "`nSicherung: $(Get-BackupRoot -Plan $plan)\<Zeit>" }
+        if ($plan.AdoptDb) { $sich += "`nDatenbank: VORHANDENE wird übernommen (alte Daten bleiben erhalten)" }
         $text = ("{0} wird {1}:`n`nOrdner/Site/Pool:  {2}`nProgramm:  {3}`nDaten:     {4}`nPort:      {5}   Adresse: {6}`nDatenbank: {7} (Rolle {8}){9}`n`nJetzt starten?" -f `
             $t.Display, $was, $plan.Ordner, $plan.ProgDir, $(if ($plan.DataDir) { $plan.DataDir } else { $plan.Paths.Data }), $(if ($t.Port -gt 0) { $t.Port } else { '?' }), $t.Url, $plan.DbName, $plan.DbUser, $sich)
         if (-not (Show-Confirm $text 'Starten')) { return }
@@ -3982,6 +4169,7 @@ $script:ChkSkipBackup.Add_CheckedChanged({
     Update-NextState
 })
 $script:ChkBackupOk.Add_CheckedChanged({ Update-NextState })
+$script:ChkAdoptDb.Add_CheckedChanged({ Update-NextState })
 
 $script:ChkShowPw.Add_CheckedChanged({ $script:TxtPgPw.UseSystemPasswordChar = -not $script:ChkShowPw.Checked })
 $script:BtnTestDb.Add_Click({
