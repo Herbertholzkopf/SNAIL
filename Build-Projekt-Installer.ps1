@@ -1,5 +1,5 @@
 ﻿<#
- Erzeugt aus Projekt-Installer.ps1 eine eigenständige EXE (PS2EXE).
+ Erzeugt aus Projekt-Installer.ps1 (SNAIL) eine eigenständige EXE (PS2EXE).
  Aufruf:
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Projekt-Installer.ps1
  Symbol: Liegt neben diesem Skript eine setup.ico, wird sie eingebettet
@@ -8,13 +8,21 @@
 [CmdletBinding()]
 param(
     [string]$IconFile = 'setup.ico',
-    [string]$Version  = '2.0.0.0'
+    [string]$Version  = '6.0.0.0'
 )
 
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
 if (-not (Get-Module -ListAvailable -Name ps2exe)) {
+    # Auf einem frischen Server fragt Install-Module unter PowerShell 5.1 sonst
+    # interaktiv nach dem NuGet-Anbieter - -Force unterdrückt das nicht.
+    $nuget = Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue |
+             Where-Object { $_.Version -ge [version]'2.8.5.201' }
+    if (-not $nuget) {
+        Write-Host 'Installiere Paketanbieter NuGet ...'
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+    }
     Write-Host 'Installiere Modul ps2exe (PowerShell Gallery) ...'
     Install-Module ps2exe -Scope CurrentUser -Force
 }
@@ -42,10 +50,10 @@ $params = @{
     STA          = $true
     x64          = $true
     version      = $Version
-    title        = (Get-SafeMetaText 'Projekt-Installer')
-    description  = (Get-SafeMetaText 'Richtet ein Projekt auf Basis der Projektvorlage ein (IIS, MySQL, .env, Konsole)')
+    title        = (Get-SafeMetaText 'SNAIL')
+    description  = (Get-SafeMetaText 'SNAIL - installiert und aktualisiert Anwendungen der projektvorlage (IIS, PostgreSQL, config.php)')
     company      = (Get-SafeMetaText 'Intern')
-    product      = (Get-SafeMetaText 'Projekt-Installer')
+    product      = (Get-SafeMetaText 'SNAIL (Simple New-project Automation & Installation Launcher)')
     copyright    = (Get-SafeMetaText ('(c) ' + (Get-Date).Year))
 }
 
