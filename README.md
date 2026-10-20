@@ -37,9 +37,9 @@ Es gibt keine zusätzliche Zustandsdatei: Wird der Katalog ausgetauscht, erkennt
 |---|---|---|
 | Mandant | Auswahl der Schlüssel aus der `services.json` + „neuer Mandant“ | **gleicher Kunde in mehreren Diensten = gleicher Schlüssel**, sonst verliert der App-Switcher den Mandanten beim Programmwechsel. Schlüssel, die für diesen Dienst schon installiert sind, sind markiert |
 | Mandanten-Schlüssel | `standard` bei der allerersten Installation, sonst leer | `app.installation`: `a-z`, `0-9`, `_`, `-`, erstes Zeichen Buchstabe oder Ziffer, max. 64 |
-| Mandanten-Name | aus der `services.json` beim gewählten Schlüssel | Anzeige im App-Switcher |
+| Mandanten-Name | aus der `services.json` beim gewählten Schlüssel | Anzeige im App-Switcher; steht zusätzlich in der Zugangsdatei, damit er einen Abbruch vor dem `services.json`-Schritt übersteht |
 | Öffentliche URL | leer = `http://localhost:<port>/` | `app.url` und `url` in der `services.json`; falls ein Cloudflare Tunnel genutzt wird, die `https://…`-Adresse |
-| Port | nächster freie ab `einstellungen.portStart` (21100) | frei heißt: in keinem IIS-Binding, kein TCP-Listener, nicht in `netsh interface ipv4 show excludedportrange protocol=tcp`. Änderbar, die Eingabe wird genauso geprüft |
+| Port | nächster freie ab `einstellungen.portStart` (21100); gibt es die Website schon (abgebrochener Lauf), deren Port | frei heißt: in keinem IIS-Binding, kein TCP-Listener, nicht in `netsh interface ipv4 show excludedportrange protocol=tcp`. HTTP.sys trägt den Port jeder laufenden Website dort ein – der Port der eigenen Website zählt deshalb nicht als reserviert. Änderbar, die Eingabe wird genauso geprüft |
 | Upload-Grenze (MB) | aus dem Katalog (`uploadsMaxMb`, Standard 25) | `uploads.max_mb` und IIS-Grenze der Website |
 | Admin-Login, -Name, -E-Mail | `admin`, `Administrator`, leer | die E-Mail braucht die Cloudflare-SSO-Anmeldung |
 | Datenordner | `D:\AK\<Ordner>`; ohne D: (oder kein Festplattenlaufwerk) `C:\AKDaten\<Ordner>` | darin Data, Cache, Logs, Temp; einzeln änderbar unter „Details“ |
@@ -183,7 +183,7 @@ Reihenfolge: erst anonyme Anfragen auf den App-Pool-Benutzer stellen (sonst 401.
 
 ## Firewall
 
-Die Website bindet `*:<port>`; „nur lokal“ heißt: **keine** Firewallregel – das reicht, wenn ein Cloudflare Tunnel (falls genutzt) auf `localhost:<port>` zeigt. „Prüfen“ warnt, wenn die Windows-Firewall nicht für alle Profile aktiv ist. Mit „Im Netzwerk erreichbar“ legt SNAIL bei der Neuinstallation eine Regel an (wie WIPP „Lokales Netzwerk“): Name `SNAIL <Ordner> (TCP <port>)` (intern `SNAIL-<Ordner>`), eingehend, TCP `<port>`, Profile Domäne und Privat, Remote-Adressen 10/8, 172.16/12, 192.168/16, fc00::/7, fe80::/10. Vorhandene Regeln fasst SNAIL beim Wiederholen/Aktualisieren nicht an.
+Die Website bindet `*:<port>`; „nur lokal“ heißt: **keine** Firewallregel – das reicht, wenn ein Cloudflare Tunnel (falls genutzt) auf `localhost:<port>` zeigt. „Prüfen“ warnt, wenn die Windows-Firewall nicht für alle Profile aktiv ist, und – bei gewählter Regel – wenn ein Netzwerk im Profil Öffentlich ist (dort greift die Regel nicht). Mit „Im Netzwerk erreichbar“ legt SNAIL bei der Neuinstallation eine Regel an (wie WIPP „Lokales Netzwerk“): Name `SNAIL <Ordner> (TCP <port>)` (intern `SNAIL-<Ordner>`), eingehend, TCP `<port>`, Profile Domäne und Privat, Remote-Adressen 10/8, 172.16/12, 192.168/16, fc00::/7, fe80::/10. Vorhandene Regeln fasst SNAIL beim Wiederholen/Aktualisieren nicht an.
 
 ## Ablage
 

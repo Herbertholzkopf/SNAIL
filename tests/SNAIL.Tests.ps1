@@ -229,12 +229,31 @@ Test-Case 'excludedportrange lesen, Port-Pruefung (IIS, Listener, reserviert, ei
     Assert ((Test-PortFree -Port 21150 -Sites $sites -Excluded $excluded -ListenerTest $listener) -match 'reserviert')
     Assert ($null -eq (Test-PortFree -Port 21102 -Sites $sites -Excluded $excluded -ListenerTest $listener))
     Assert ($null -eq (Test-PortFree -Port 21100 -Sites $sites -Excluded $excluded -OwnSite 'projekt' -ListenerTest { $true })) 'eigene Website zaehlt nicht'
+    # HTTP.sys traegt den Port jeder laufenden Website in die excludedportrange ein (Windows-Test 7.3)
+    $mitIis = @($excluded) + [pscustomobject]@{ Start = 21100; End = 21100 }
+    Assert ($null -eq (Test-PortFree -Port 21100 -Sites $sites -Excluded $mitIis -OwnSite 'projekt' -ListenerTest { $true })) 'eigener Port trotz excludedportrange frei'
+    Assert ((Test-PortFree -Port 21100 -Sites $sites -Excluded $mitIis -ListenerTest $listener) -match "Website 'projekt'") 'fremd: Website genannt, nicht reserviert'
+    Assert-Equal 'von Windows reserviert (21150)' (Test-PortFree -Port 21150 -Excluded @([pscustomobject]@{ Start = 21150; End = 21150 }) -ListenerTest $listener)
     Assert ($null -ne (Test-PortFree -Port 0 -Sites $sites))
 }
 Test-Case 'Get-NextFreePort ueberspringt belegte und reservierte Ports' {
     Assert-Equal 21102 (Get-NextFreePort -Start 21100 -Sites $sites -Excluded $excluded -ListenerTest $listener)
     Assert-Equal 21205 (Get-NextFreePort -Start 21105 -Sites $sites -Excluded $excluded -ListenerTest $listener)
     Assert-Equal 21104 (Get-NextFreePort -Start 21100 -Sites $sites -Excluded $excluded -ListenerTest $listener -Skip @(21102, 21103))
+}
+Test-Case 'Get-DisabledFirewallProfiles: alle aktiv = leere Liste (nicht $null), eines aus, nicht lesbar' {
+    function Get-NetFirewallProfile { @([pscustomobject]@{ Name = 'Domain'; Enabled = 'True' }, [pscustomobject]@{ Name = 'Public'; Enabled = 'NotConfigured' }) }
+    $r = Get-DisabledFirewallProfiles
+    Assert ($null -ne $r) 'leere Liste darf nicht $null werden'; Assert-Equal 0 @($r).Count
+    function Get-NetFirewallProfile { @([pscustomobject]@{ Name = 'Domain'; Enabled = 'True' }, [pscustomobject]@{ Name = 'Public'; Enabled = 'False' }) }
+    Assert-Equal 'Public' ((Get-DisabledFirewallProfiles) -join ',')
+    function Get-NetFirewallProfile { throw 'kein Modul' }
+    Assert ($null -eq (Get-DisabledFirewallProfiles)) 'nicht lesbar'
+    function Get-NetConnectionProfile { @([pscustomobject]@{ Name = 'Netzwerk'; InterfaceAlias = 'Ethernet'; NetworkCategory = 'Public' }) }
+    Assert-Equal 'Netzwerk (Ethernet)' ((Get-PublicNetworks) -join ',')
+    function Get-NetConnectionProfile { @([pscustomobject]@{ Name = 'LAN'; InterfaceAlias = 'Ethernet'; NetworkCategory = 'Private' }) }
+    $pn = Get-PublicNetworks
+    Assert-Equal 0 $pn.Count
 }
 Test-Case 'Get-PortFromBindings, Firewall-Vorschau' {
     Assert-Equal 21100 (Get-PortFromBindings 'http/*:21100:,https/*:443:')
@@ -331,6 +350,13 @@ Test-Case 'Read-KeyValueFile: WIPP-Format (Wert ungetrimmt, = und # im Passwort)
     $h = Read-KeyValueFile $f
     Assert-Equal 'a=b#c d ' $h['passwort']; Assert-Equal '5432' $h['port']
 }
+Test-Case 'Get-ErrorLine (Migrationsfehler mit ^), Format-Size' {
+    $l = @('Führe 1 Migration(en) aus', '  [FEHLER] Migration 9999_kaputt.sql fehlgeschlagen: SQLSTATE[42601]', 'LINE 1: SELECT kaputt(;', '                      ^')
+    Assert ((Get-ErrorLine $l) -match '9999_kaputt') (Get-ErrorLine $l)
+    Assert-Equal 'Datenbankverbindung weg' (Get-ErrorLine @('Datenbankverbindung weg', '   ^  '))
+    Assert-Equal '26 KB' ((Format-Size 25952) -replace '\s', ' ')
+    Assert ((Format-Size 5MB) -match '^5[,.]0 MB$') (Format-Size 5MB)
+}
 Test-Case 'ConvertFrom-CheckOutput: Hinweise und Details werden zugeordnet' {
     $i = ConvertFrom-CheckOutput @('[OK     ] PHP 8.3', '[WARNUNG] services.json', '          Datei fehlt', '          Detail: C:\AK\services.json', '[FEHLER ] Datenbank', 'Ergebnis: FEHLER')
     Assert-Equal 3 $i.Count; Assert-Equal 'WARNUNG' $i[1].Status; Assert-Equal 'Datei fehlt Detail: C:\AK\services.json' $i[1].Hint
@@ -410,7 +436,7 @@ $zip2 = Join-Path $tmp 'doppelt.zip'
 & git -C $Vorlage archive --format=zip --prefix=projektvorlage-main/projektvorlage-main/ -o $zip2 HEAD
 Test-Case 'Expand-TemplateZip: Zwischenordner (auch doppelt) erkannt, Aufbau, Wiederverwendung, Aufraeumen' {
     $st = Expand-TemplateZip -Zip $zip2
-    Assert-Equal 'projektvorlage-main/projektvorlage-main' ($st.Inner -replace '\\', '/')
+    Assert-Equal 'projektvorlage-main\projektvorlage-main' $st.Inner 'aus den Ordnernamen, nicht per Substring (8.3-Pfade)'
     $d2 = $st.Dir
     $st = Expand-TemplateZip -Zip $zip
     Assert (-not (Test-Path $d2)) 'alter Temp-Ordner geloescht'
@@ -461,15 +487,29 @@ Test-Case 'Get-InstalledInstances: zwei Mandanten, BOM, ohne config.php / bin\co
     Assert-Equal 'olaf' $o.Db.Name 'Fallback ohne db in info'
     Assert-Equal 'Erwin (services.json)' $o.Service.Name 'nicht im Katalog: Name aus services.json'
     Assert (-not $o.Service.InCatalog)
+    # Mandanten-Name aus der Zugangsdatei, wenn er in der services.json fehlt (Abbruch vor dem services.json-Schritt)
+    $cred = Join-Path $tmp 'cred'
+    New-Item -ItemType Directory -Path $cred -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $cred 'projekt-beispiel.txt'), "# x`r`nmandant_name=Beispiel AG`r`n")
+    $mitCred = @(Get-InstalledInstances -ProgRoot $ak -PhpExe $PhpExe -Catalog $catalog.Services -Sites $sites -ServicesJson $sjf -CredDir $cred)
+    Assert-Equal 'Beispiel AG' $mitCred[2].Name 'Name aus der Zugangsdatei'
+    Assert-Equal 'Muster GmbH' $mitCred[1].Name 'services.json hat Vorrang'
     # Katalog ausgetauscht: Installationen werden trotzdem erkannt
     $leer = @(Get-InstalledInstances -ProgRoot $ak -PhpExe $PhpExe -Catalog @{} -Sites $sites -ServicesJson $sjf)
     Assert-Equal 3 $leer.Count
     Assert-Equal 'Projektvorlage' $leer[1].Service.Name 'Name aus services.json'
+    New-Item -ItemType Directory -Path (Join-Path $ak 'logos') -Force | Out-Null
+    Copy-Item (Join-Path $PSScriptRoot '../logos/renate.png') (Join-Path $ak 'logos/erwin.png')
+    $tree = Read-ServicesJson $sjf; $tree['services'][1]['logo'] = 'logos/erwin.png'
+    [System.IO.File]::WriteAllText($sjf, (ConvertTo-ServicesJsonText $tree))
+    $mitLogo = @(Get-InstalledInstances -ProgRoot $ak -PhpExe $PhpExe -Catalog @{} -Sites $sites -ServicesJson $sjf)
+    Assert-Equal 'png' $mitLogo[0].Service.Logo.Ext 'Logo aus der services.json fuer die Anzeige'
     $t = ConvertTo-InstallTarget -Instance $a
     Assert-Equal 'installed' $t.Kind; Assert-Equal (Join-Path $tmp 'daten/projekt') $t.DataDir.Replace('\', '/') 'gemeinsamer Datenordner'
     # zweiter Mandant mit diesen Installationen
     $n = New-InstanceInput -Service $svc -Values (New-TestValues @{ Key = 'dritte' }) -Instances $found
     Assert-Equal 'projekt-dritte' $n.Inst.Ordner
+    Assert ($n.Inst.OrdnerReason -match '2-mal') $n.Inst.OrdnerReason
 }
 
 # =============================================================================

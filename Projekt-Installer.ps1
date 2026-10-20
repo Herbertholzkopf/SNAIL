@@ -1283,22 +1283,24 @@ function Get-ExcludedPortRanges {
 
 <#
  Ist ein Port fuer eine neue Website frei? Liefert $null oder den Grund:
- Binding einer IIS-Website, aktiver TCP-Listener, von Windows reserviert.
+ Binding einer IIS-Website, von Windows reserviert, aktiver TCP-Listener.
  -OwnSite: Bindings dieser Website zaehlen nicht (Wiederholung nach Abbruch).
+ HTTP.sys traegt den Port jeder laufenden Website als verwalteten
+ Portausschluss in die excludedportrange ein - ein Port, den die eigene
+ Website gebunden hat, gilt deshalb weder als reserviert noch als belegt.
 #>
 function Test-PortFree {
     param([Parameter(Mandatory)][int]$Port, $Sites = @(), $Excluded = @(), [string]$OwnSite = '', [scriptblock]$ListenerTest = $null)
     if ($Port -lt 1 -or $Port -gt 65535) { return 'kein gültiger Port (1-65535)' }
     $site = @($Sites | Where-Object { $_.Name -ine $OwnSite -and $_.Bindings -match (':' + $Port + ':') }) | Select-Object -First 1
     if ($site) { return "gehört zur Website '$($site.Name)'" }
-    foreach ($x in $Excluded) {
-        if ($Port -ge $x.Start -and $Port -le $x.End) { return "von Windows reserviert (excludedportrange $($x.Start)-$($x.End))" }
-    }
     $ownHas = $OwnSite -and @($Sites | Where-Object { $_.Name -ieq $OwnSite -and $_.Bindings -match (':' + $Port + ':') }).Count -gt 0
-    if (-not $ownHas) {
-        $inUse = if ($ListenerTest) { & $ListenerTest $Port } else { Test-TcpPortInUse -Port $Port }
-        if ($inUse) { return 'von einem anderen Programm belegt (TCP-Listener)' }
+    if ($ownHas) { return $null }
+    foreach ($x in $Excluded) {
+        if ($Port -ge $x.Start -and $Port -le $x.End) { return $(if ($x.Start -eq $x.End) { "von Windows reserviert ($Port)" } else { "von Windows reserviert ($($x.Start)-$($x.End))" }) }
     }
+    $inUse = if ($ListenerTest) { & $ListenerTest $Port } else { Test-TcpPortInUse -Port $Port }
+    if ($inUse) { return 'von einem anderen Programm belegt (TCP-Listener)' }
     return $null
 }
 
@@ -1542,12 +1544,19 @@ function Get-AclDataDirs {
 
 # Sind alle Profile der Windows-Firewall aktiv? Liefert die inaktiven (leer = alles gut) oder $null (unbekannt)
 function Get-DisabledFirewallProfiles {
-    # Enabled ist ein GpoBoolean (True/False/NotConfigured; NotConfigured = Standard = an)
-    try { return @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { [string]$_.Enabled -eq 'False' } | ForEach-Object { [string]$_.Name }) }
+    # Enabled ist ein GpoBoolean (True/False/NotConfigured; NotConfigured = Standard = an).
+    # Komma vor dem Array: sonst wird eine leere Liste beim return zu $null ("nicht lesbar")
+    try { return , @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { [string]$_.Enabled -eq 'False' } | ForEach-Object { [string]$_.Name }) }
     catch { return $null }
 }
 
 function Get-FirewallRuleName { param([string]$Ordner) return "SNAIL-$Ordner" }
+
+# Netzwerke im Profil "Oeffentlich" - dort greift die SNAIL-Regel (Domaene/Privat) nicht
+function Get-PublicNetworks {
+    try { return , @(Get-NetConnectionProfile -ErrorAction Stop | Where-Object { [string]$_.NetworkCategory -eq 'Public' } | ForEach-Object { '{0} ({1})' -f $_.Name, $_.InterfaceAlias }) }
+    catch { return , @() }
+}
 
 function Get-FirewallPreview {
     param([Parameter(Mandatory)][string]$Ordner, [Parameter(Mandatory)][int]$Port)
@@ -1606,15 +1615,22 @@ function Test-FixedDrive {
 
 # Ordner mit bin\console und public\index.php suchen (GitHub-ZIPs haben einen
 # Zwischenordner "<repo>-<branch>"), hoechstens zwei Ebenen tief
+# Liefert @{ Path; Rel } oder $null. Rel wird aus den Ordnernamen gebildet,
+# nicht per Substring: %TEMP% kann in 8.3-Kurzform (ADMINI~1) vorliegen,
+# Get-ChildItem liefert aber die lange Form.
 function Find-TemplateRoot {
     param([Parameter(Mandatory)][string]$Dir)
-    $kandidaten = @(Get-Item -LiteralPath $Dir)
-    $kandidaten += @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue)
-    $kandidaten += @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue })
+    $kandidaten = @([pscustomobject]@{ Path = (Get-Item -LiteralPath $Dir).FullName; Rel = '' })
+    foreach ($a in @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue)) {
+        $kandidaten += [pscustomobject]@{ Path = $a.FullName; Rel = $a.Name }
+        foreach ($b in @(Get-ChildItem -LiteralPath $a.FullName -Directory -ErrorAction SilentlyContinue)) {
+            $kandidaten += [pscustomobject]@{ Path = $b.FullName; Rel = ($a.Name + '\' + $b.Name) }
+        }
+    }
     foreach ($k in $kandidaten) {
-        $console = Join-Path (Join-Path $k.FullName 'bin') 'console'
-        $index = Join-Path (Join-Path $k.FullName 'public') 'index.php'
-        if ((Test-Path -LiteralPath $console) -and (Test-Path -LiteralPath $index)) { return $k.FullName }
+        $console = Join-Path (Join-Path $k.Path 'bin') 'console'
+        $index = Join-Path (Join-Path $k.Path 'public') 'index.php'
+        if ((Test-Path -LiteralPath $console) -and (Test-Path -LiteralPath $index)) { return $k }
     }
     return $null
 }
@@ -1633,10 +1649,10 @@ function Expand-TemplateZip {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     Write-Log "Entpacke $($item.FullName) ..."
     [System.IO.Compression.ZipFile]::ExtractToDirectory($item.FullName, $dir)
-    $root = Find-TemplateRoot -Dir $dir
-    $inner = ''
-    if ($root -and $root -ne $dir) { $inner = $root.Substring($dir.Length).TrimStart('\', '/') }
-    $script:Staging = [pscustomobject]@{ Tag = $tag; Dir = $dir; Root = $root; Inner = $inner; Zip = $item.FullName }
+    $found = Find-TemplateRoot -Dir $dir
+    $script:Staging = [pscustomobject]@{
+        Tag = $tag; Dir = $dir; Root = $(if ($found) { $found.Path } else { $null }); Inner = $(if ($found) { $found.Rel } else { '' }); Zip = $item.FullName
+    }
     return $script:Staging
 }
 
@@ -1877,6 +1893,12 @@ function New-ProjectDatabase {
     }
 }
 
+function Format-Size {
+    param([long]$Bytes)
+    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    return ('{0:N0} KB' -f [math]::Ceiling($Bytes / 1KB))
+}
+
 # Ordner fuer Sicherungen einer Installation: <Datenordner>\Sicherung
 # (nicht im Programmordner - robocopy /MIR wuerde sie loeschen)
 function Get-BackupRoot {
@@ -1891,7 +1913,7 @@ function Get-BackupInfo {
     if (-not (Test-Path -LiteralPath $Root)) { return [pscustomobject]@{ Count = 0; Bytes = [long]0; Text = "noch keine ($Root)" } }
     $dirs = @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)
     $bytes = [long](@(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum)
-    return [pscustomobject]@{ Count = $dirs.Count; Bytes = $bytes; Text = ('{0} Sicherung(en), zusammen {1:N1} MB in {2} - SNAIL löscht nie automatisch' -f $dirs.Count, ($bytes / 1MB), $Root) }
+    return [pscustomobject]@{ Count = $dirs.Count; Bytes = $bytes; Text = ('{0} Sicherung(en), zusammen {1} in {2} - SNAIL löscht nie automatisch' -f $dirs.Count, (Format-Size $bytes), $Root) }
 }
 
 <#
@@ -1911,10 +1933,11 @@ function Backup-Installation {
     $dump = Join-Path $dir ($Plan.DbName + '.dump')
     $r = Invoke-PgTool -Tool 'pg_dump.exe' -Pg $Plan.Pg -Password $Password -TimeoutSec 3600 -Arguments @('-Fc', '-f', $dump, '-d', $Plan.DbName)
     if ($r.ExitCode -ne 0) { throw "pg_dump fehlgeschlagen: $($r.Error.Trim() -replace '\s+', ' ')" }
-    $size = (Get-Item -LiteralPath $dump).Length
-    Write-Log ("Sicherung: {0} ({1:N1} MB) und config.php in {2}" -f (Split-Path -Leaf $dump), ($size / 1MB), $dir) 'Ok'
+    # Groesse wie auf "Pruefen": ganze Sicherung (Dump + config.php)
+    $size = [long](@(Get-ChildItem -LiteralPath $dir -File | Measure-Object -Property Length -Sum).Sum)
+    Write-Log ("Sicherung: {0} und config.php in {1} (zusammen {2})" -f (Split-Path -Leaf $dump), $dir, (Format-Size $size)) 'Ok'
     Write-Log 'Der Data-Ordner gehört in die reguläre Sicherung - SNAIL kopiert ihn nicht.'
-    return [pscustomobject]@{ Dir = $dir; Bytes = [long]$size; Text = ('{0} ({1:N1} MB)' -f $dir, ($size / 1MB)) }
+    return [pscustomobject]@{ Dir = $dir; Bytes = [long]$size; Text = ('{0} ({1})' -f $dir, (Format-Size $size)) }
 }
 
 # Wie viele Benutzerkonten hat die Anwendung? (-1 = Tabelle fehlt / nicht lesbar)
@@ -2018,9 +2041,18 @@ function Invoke-Console {
 function Invoke-ConsoleMigrate {
     param([Parameter(Mandatory)]$Plan)
     $r = Invoke-Console -Plan $Plan -Arguments @('migrate')
-    if ($r.ExitCode -ne 0) { throw "Migrationen fehlgeschlagen (php bin\console migrate): $($r.Lines | Select-Object -Last 1)" }
+    if ($r.ExitCode -ne 0) { throw "Migrationen fehlgeschlagen (php bin\console migrate): $(Get-ErrorLine -Lines $r.Lines)" }
     $count = @($r.Lines | Where-Object { $_ -match '^\s*\[OK\]' }).Count
     return [pscustomobject]@{ Count = $count; UpToDate = (($r.Lines -join ' ') -match 'Keine offenen Migrationen') }
+}
+
+# Aussagekraeftige Fehlerzeile aus einer Ausgabe: die erste mit [FEHLER]/Fehler,
+# sonst die letzte, die nicht nur aus Zeichen wie ^ oder ~ besteht (PostgreSQL markiert so die Stelle)
+function Get-ErrorLine {
+    param([string[]]$Lines)
+    $hit = @($Lines | Where-Object { $_ -match '\[FEHLER\]|FEHLER|Fehler|Error|Exception' }) | Select-Object -First 1
+    if (-not $hit) { $hit = @($Lines | Where-Object { $_ -match '[\p{L}\d]' }) | Select-Object -Last 1 }
+    return ([string]$hit).Trim()
 }
 
 <#
@@ -2045,7 +2077,7 @@ function Invoke-ConsoleUserCreate {
         Write-Log "Benutzer '$($a.Login)' existiert bereits - Passwort bleibt unverändert (Notfall: php bin\console user:password $($a.Login))."
         return [pscustomobject]@{ Existed = $true; Passwort = $null; Text = "Benutzer '$($a.Login)' war bereits vorhanden" }
     }
-    throw "Administrator konnte nicht angelegt werden (php bin\console user:create): $($r.Lines | Select-Object -Last 1)"
+    throw "Administrator konnte nicht angelegt werden (php bin\console user:create): $(Get-ErrorLine -Lines $r.Lines)"
 }
 
 <#
@@ -2227,12 +2259,13 @@ function Save-InstallCredentials {
         if (-not (Test-Path -LiteralPath $script:CredDir)) { New-Item -ItemType Directory -Path $script:CredDir -Force | Out-Null }
         $map = [ordered]@{}
         $old = Read-KeyValueFile -Path $file
-        $order = @('format', 'dienst', 'installation', 'ordner', 'url', 'lokal', 'db_host', 'db_port', 'db_name', 'db_benutzer', 'db_passwort', 'admin_login', 'admin_initialpasswort')
+        $order = @('format', 'dienst', 'installation', 'mandant_name', 'ordner', 'url', 'lokal', 'db_host', 'db_port', 'db_name', 'db_benutzer', 'db_passwort', 'admin_login', 'admin_initialpasswort')
         foreach ($k in $order) { if ($old -and $old.ContainsKey($k)) { $map[$k] = $old[$k] } }
         if ($old) { foreach ($k in $old.Keys) { if (-not $map.Contains($k)) { $map[$k] = $old[$k] } } }
         $map['format'] = [string]$script:FormatVersion
         $map['dienst'] = $Plan.Inst.Service.Key
         $map['installation'] = $Plan.Inst.Key
+        $map['mandant_name'] = $Plan.Inst.Name
         $map['ordner'] = $Plan.ProgDir
         $map['url'] = $Plan.Inst.Url
         $map['lokal'] = "http://localhost:$($Plan.Inst.Port)/"
@@ -2259,11 +2292,12 @@ function Save-InstallCredentials {
 # Eintrag eines Dienstes/einer Installation in der services.json (Namen, url)
 function Get-ServicesEntry {
     param($Tree, [string]$ServiceKey, [string]$InstKey)
-    $res = [pscustomobject]@{ ServiceName = ''; InstName = ''; Url = ''; Found = $false }
+    $res = [pscustomobject]@{ ServiceName = ''; InstName = ''; Url = ''; Found = $false; Logo = '' }
     if ($null -eq $Tree) { return $res }
     foreach ($s in @($Tree['services'])) {
         if ($s -isnot [System.Collections.IDictionary] -or [string]$s['key'] -cne $ServiceKey) { continue }
         $res.ServiceName = [string]$s['name']
+        $res.Logo = [string]$s['logo']
         foreach ($x in @($s['installations'])) {
             if ($x -is [System.Collections.IDictionary] -and [string]$x['key'] -ceq $InstKey) {
                 $res.InstName = [string]$x['name']; $res.Url = [string]$x['url']; $res.Found = $true
@@ -2283,7 +2317,7 @@ function Get-ServicesEntry {
  Katalog (fehlt er dort, gilt der Name aus services.json bzw. app.name).
 #>
 function Get-InstalledInstances {
-    param([Parameter(Mandatory)][string]$ProgRoot, [string]$PhpExe, $Catalog = @{}, $Sites = @(), [string]$ServicesJson = '')
+    param([Parameter(Mandatory)][string]$ProgRoot, [string]$PhpExe, $Catalog = @{}, $Sites = @(), [string]$ServicesJson = '', [string]$CredDir = '')
     $list = New-Object System.Collections.Generic.List[object]
     if (-not (Test-Path -LiteralPath $ProgRoot)) { return @() }
     $tree = $null
@@ -2324,11 +2358,19 @@ function Get-InstalledInstances {
         $entry = Get-ServicesEntry -Tree $tree -ServiceKey $inst.ServiceKey -InstKey $inst.Key
         $inst.InServicesJson = $entry.Found
         $inst.ServicesUrl = $entry.Url
-        $inst.Name = if ($entry.InstName) { $entry.InstName } elseif ($inst.Key) { $inst.Key } else { '?' }
+        # Mandanten-Name: services.json, sonst die Zugangsdatei (Abbruch vor dem
+        # services.json-Schritt), sonst der Schluessel
+        $credName = ''
+        if (-not $entry.InstName -and $CredDir) {
+            try { $kv = Read-KeyValueFile -Path (Join-Path $CredDir ($d.Name + '.txt')); if ($kv -and $kv['mandant_name']) { $credName = [string]$kv['mandant_name'] } } catch { }
+        }
+        $inst.Name = if ($entry.InstName) { $entry.InstName } elseif ($credName) { $credName } elseif ($inst.Key) { $inst.Key } else { '?' }
         if ($inst.ServiceKey -and $Catalog.ContainsKey($inst.ServiceKey)) { $inst.Service = $Catalog[$inst.ServiceKey] }
         else {
             $n = if ($entry.ServiceName) { $entry.ServiceName } elseif ($inst.AppName) { $inst.AppName } else { $d.Name }
             $inst.Service = New-PseudoService -Key $(if ($inst.ServiceKey) { $inst.ServiceKey } else { $d.Name }) -Name $n
+            # nur fuer die Anzeige in SNAIL - die services.json behaelt ihren Eintrag
+            if ($entry.Logo -and $ServicesJson) { $inst.Service.Logo = Get-LogoData -Value $entry.Logo -BaseDir (Split-Path -Parent $ServicesJson) }
         }
         $inst.Display = if ($inst.Error) { "$($d.Name) (nicht lesbar)" } else { '{0} - {1}' -f $inst.Service.Name, $inst.Name }
         $list.Add($inst)
@@ -2370,7 +2412,8 @@ function Resolve-Ordner {
     $same = @($Instances | Where-Object { $_.ServiceKey -ceq $ServiceKey })
     $other = "$ServiceKey-$InstKey"
     if ($same.Count -gt 0) {
-        return [pscustomobject]@{ Name = $other; Reason = ("weitere Installation ('{0}' ist schon als {1} installiert)" -f $ServiceKey, (($same | ForEach-Object { $_.Ordner }) -join ', ')); Existing = $null }
+        $wo = if ($same.Count -eq 1) { "als $($same[0].Ordner)" } else { "$($same.Count)-mal" }
+        return [pscustomobject]@{ Name = $other; Reason = ("weitere Installation ('{0}' ist schon {1} installiert)" -f $ServiceKey, $wo); Existing = $null }
     }
     if (-not $FirstFree) { return [pscustomobject]@{ Name = $other; Reason = "weitere Installation ($FirstReason)"; Existing = $null } }
     return [pscustomobject]@{ Name = $ServiceKey; Reason = 'erste Installation des Dienstes'; Existing = $null }
@@ -2546,7 +2589,11 @@ function Test-Installation {
         $why = Test-PortFree -Port $inst.Port -Sites $sites -Excluded (Get-ExcludedPortRanges) -OwnSite $(if ($own) { $own.Name } else { '' })
         if ($why) { & $add 'Error' 'Port' "$($inst.Port) $why." }
         else { & $add 'Ok' 'Port' ("{0} frei (http://localhost:{0}/; falls ein Cloudflare Tunnel genutzt wird, zeigt er hierhin)" -f $inst.Port) }
-        if ($inst.Firewall) { & $add 'Info' 'Firewallregel' ("wird angelegt: SNAIL {0} (TCP {1}, Domäne/Privat, private Adressbereiche)" -f $plan.Ordner, $inst.Port) }
+        if ($inst.Firewall) {
+            & $add 'Info' 'Firewallregel' ("wird angelegt: SNAIL {0} (TCP {1}, Domäne/Privat, private Adressbereiche)" -f $plan.Ordner, $inst.Port)
+            $pub = Get-PublicNetworks   # liefert immer eine Liste (ohne @(), das wuerde sie einpacken)
+            if ($pub.Count -gt 0) { & $add 'Warn' 'Firewallregel' ("Netzwerk im Profil Öffentlich: {0} - dort greift die Regel nicht (nur Domäne/Privat). Netzwerkprofil prüfen." -f ($pub -join ', ')) }
+        }
         else { & $add 'Ok' 'Firewallregel' 'keine - der Port ist nur auf diesem Server erreichbar.' }
     } else {
         $i0 = $inst.Instance
@@ -2789,6 +2836,8 @@ function Set-StepState {
         'Warn'    { $item.Text = [string][char]0x26A0; $item.ForeColor = $script:ColWarn }
         'Failed'  { $item.Text = [string][char]0x2717; $item.ForeColor = $script:ColErr }
     }
+    $item.EnsureVisible()
+    $script:LvSteps.Invalidate()
     Invoke-UiPump
 }
 
@@ -2839,7 +2888,7 @@ function Invoke-Installation {
         Write-Log ("Datenbank {0}, Rolle {1}, Passwort {2}." -f $Plan.DbName, $Plan.DbUser, $script:Result.Db.Source)
 
         for ($i = 0; $i -lt $steps.Count; $i++) {
-            if ($script:AbortRequested) { throw 'Abgebrochen auf Wunsch des Anwenders (nach dem letzten abgeschlossenen Schritt).' }
+            if ($script:AbortRequested) { throw 'Abgebrochen auf Wunsch des Anwenders (nach dem letzten abgeschlossenen Schritt) - beim nächsten Lauf geht es dort weiter.' }
             $step = $steps[$i]
             Set-StepState $i 'Running'
             Write-Log $step.Title 'Step'
@@ -2951,8 +3000,8 @@ function Invoke-Installation {
         if (-not $script:AbortRequested) { Set-StepState $i 'Failed' }
         $script:Result.Rows = $rows.ToArray()
         $script:Result.Error = $_.Exception.Message
-        Write-Log $_.Exception.Message 'Error'
-        Write-Log ("=== {0} fehlgeschlagen ===" -f $inst.Display) 'Error'
+        Write-Log $_.Exception.Message $(if ($script:AbortRequested) { 'Warn' } else { 'Error' })
+        Write-Log ("=== {0} {1} ===" -f $inst.Display, $(if ($script:AbortRequested) { 'abgebrochen' } else { 'fehlgeschlagen' })) $(if ($script:AbortRequested) { 'Warn' } else { 'Error' })
         return $false
     } finally {
         if ($poolStopped) { try { Start-ProjectPool -Name $Plan.Ordner } catch { } }
@@ -3129,6 +3178,10 @@ $script:BtnNext.Font      = $fontBold
 $script:BtnNext.BackColor = $script:ColAccent
 $script:BtnNext.ForeColor = [System.Drawing.Color]::White
 $script:BtnNext.FlatStyle = 'Flat'
+$script:BtnNext.Add_EnabledChanged({
+    $script:BtnNext.BackColor = if ($script:BtnNext.Enabled) { $script:ColAccent } else { [System.Drawing.Color]::FromArgb(200, 205, 210) }
+    $script:BtnNext.ForeColor = if ($script:BtnNext.Enabled) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(120, 120, 120) }
+})
 
 $statusBar = New-Object System.Windows.Forms.Panel
 $statusBar.Size      = New-Object System.Drawing.Size($script:FormW, 24)
@@ -3163,7 +3216,7 @@ function Update-ProjectList {
     $php = Find-PhpExe
     $sites = if (Test-Path -LiteralPath $script:AppCmd) { @(Get-IisSites) } else { @() }
     $script:Instances = @(Get-InstalledInstances -ProgRoot $script:Settings.ProgRoot -PhpExe $php -Catalog $script:Services `
-        -Sites $sites -ServicesJson (Join-Path $script:Settings.ProgRoot 'services.json'))
+        -Sites $sites -ServicesJson (Join-Path $script:Settings.ProgRoot 'services.json') -CredDir $script:CredDir)
     foreach ($x in $script:Instances) { Write-Log ("Gefunden: {0} ({1}, {2}/{3}, Port {4}){5}" -f $x.Ordner, $x.Display, $x.ServiceKey, $x.Key, $x.Port, $(if ($x.Error) { " - $($x.Error)" } else { '' })) }
 
     foreach ($lv in @($script:LvInstalled, $script:LvCatalog)) {
@@ -3247,7 +3300,8 @@ $script:TxtTenantName = New-Field $script:PnlInput 0 100 'Mandanten-Name:' 300
 $script:TxtUrl        = New-Field $script:PnlInput 0 130 'Öffentliche URL:' 300
 New-Label $script:PnlInput 156 156 304 30 'leer = http://localhost:<Port>/. Falls ein Cloudflare Tunnel genutzt wird: die https-Adresse.' $script:ColGray | Out-Null
 $script:TxtPort       = New-Field $script:PnlInput 0 190 'Port:' 80
-$script:LblPortState  = New-Label $script:PnlInput 244 193 220 20 ''
+$script:LblPortState  = New-Label $script:PnlInput 244 193 216 20 ''
+$script:Tip = New-Object System.Windows.Forms.ToolTip
 $script:TxtUpload     = New-Field $script:PnlInput 0 220 'Upload-Grenze (MB):' 80
 $script:TxtAdminLogin = New-Field $script:PnlInput 0 250 'Admin-Login:' 180
 $script:TxtAdminName  = New-Field $script:PnlInput 0 280 'Admin-Name:' 300
@@ -3352,6 +3406,9 @@ function Update-InputDerived {
     $s = $script:NewService
     $key = $script:TxtKey.Text.Trim()
     $ordner = ''
+    $o = $null
+    # Eine Meldung von "Weiter" gilt nur fuer die Eingaben von damals
+    $script:LblInputErr.Text = ''
     if (Test-ServiceKey $key) {
         $o = Resolve-Ordner -ServiceKey $s.Key -InstKey $key -Instances $script:Instances -FirstFree $script:InputFirst.Free -FirstReason $script:InputFirst.Reason
         $ordner = $o.Name
@@ -3369,7 +3426,7 @@ function Update-InputDerived {
     }
     # Gibt es die Website schon (Abbruch eines frueheren Laufs), gilt ihr Port -
     # SNAIL aendert keine Bindings. Sonst der Vorschlag, solange nicht von Hand geaendert.
-    if ($script:PortAuto) {
+    if ($script:PortAuto -and -not ($o -and $o.Existing)) {
         $own = @($script:InputSites | Where-Object { $ordner -and $_.Name -ieq $ordner }) | Select-Object -First 1
         $want = if ($own -and (Get-PortFromBindings $own.Bindings) -gt 0) { Get-PortFromBindings $own.Bindings } else { $script:InputPortSuggestion }
         if ($want -gt 0 -and $script:TxtPort.Text -ne [string]$want) {
@@ -3384,6 +3441,7 @@ function Update-InputDerived {
         $why = Test-PortFree -Port $p -Sites $script:InputSites -Excluded $script:InputExcluded -OwnSite $ordner
         $script:LblPortState.Text = if ($why) { $why } else { 'frei' }
         $script:LblPortState.ForeColor = if ($why) { $script:ColErr } else { $script:ColOk }
+        $script:Tip.SetToolTip($script:LblPortState, $script:LblPortState.Text)
     } else {
         $script:LblPortState.Text = 'Zahl 1-65535'
         $script:LblPortState.ForeColor = $script:ColErr
@@ -3507,8 +3565,10 @@ function Initialize-CheckInputs {
     $zip = [string]$t.Service.Zip
     $hasZip = ($zip -and (Test-Path -LiteralPath $zip))
     $script:TxtZip.Text = $zip
-    # Neu: ZIP, falls vorhanden. Vorhanden: ohne ZIP = Wiederholen, ZIP = Aktualisieren
-    $script:RbZip.Checked = ($t.Kind -eq 'new' -and [bool]$hasZip)
+    # Neu: ZIP, falls vorhanden - ausser der Programmordner ist schon befuellt.
+    # Vorhanden: ohne ZIP = Wiederholen, ZIP = Aktualisieren
+    $filled = ($t.Kind -eq 'new' -and (Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $script:Settings.ProgRoot $t.Ordner) 'bin') 'console')))
+    $script:RbZip.Checked = ($t.Kind -eq 'new' -and [bool]$hasZip -and -not $filled)
     $script:RbExisting.Checked = -not $script:RbZip.Checked
     $script:ChkSkipBackup.Checked = $false
     $script:ChkBackupOk.Checked = $false
@@ -3607,6 +3667,8 @@ $script:LblInstallError.Anchor = 'Left,Right,Bottom'
 function Initialize-InstallPage {
     $script:LblInstHead.Text = "{0}: {1}" -f $(switch ($script:Plan.Mode) { 'update' { 'Aktualisieren' } 'repeat' { 'Einrichtung wiederholen' } default { 'Neu installieren' } }), $script:Target.Display
     $script:LblInstallError.Text = ''
+    $script:LvSteps.BeginUpdate()
+    $script:LvSteps.SelectedItems.Clear()
     $script:LvSteps.Items.Clear()
     foreach ($s in (Get-StepPlan -Plan $script:Plan)) {
         $item = New-Object System.Windows.Forms.ListViewItem([string][char]0x25CB)
@@ -3614,6 +3676,8 @@ function Initialize-InstallPage {
         $item.ForeColor = [System.Drawing.Color]::Gray
         [void]$script:LvSteps.Items.Add($item)
     }
+    $script:LvSteps.EndUpdate()
+    $script:LvSteps.Refresh()
 }
 
 # ==============================================================================
@@ -3872,6 +3936,8 @@ $script:CmbTenant.Add_SelectedIndexChanged({
     $k = $script:CmbTenant.SelectedIndex
     if ($k -le 0) {
         $script:TxtKey.ReadOnly = $false
+        $script:TxtKey.Text = ''
+        $script:TxtTenantName.Text = ''
     } else {
         $t = $script:InputTenants[$script:TenantKeys[$k]]
         $script:TxtKey.Text = $t.Key
