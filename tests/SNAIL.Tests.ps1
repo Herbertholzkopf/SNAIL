@@ -422,6 +422,13 @@ Test-Case 'Read-KeyValueFile: WIPP-Format (Wert ungetrimmt, = und # im Passwort)
     $h = Read-KeyValueFile $f
     Assert-Equal 'a=b#c d ' $h['passwort']; Assert-Equal '5432' $h['port']
 }
+Test-Case 'Split-TextToWidth: Umbruch an Leerzeichen, zu langes Wort bleibt ganz, leerer Text' {
+    $len = { param($s) $s.Length }
+    Assert-Equal @('aaa bbb', 'ccc') (Split-TextToWidth -Text 'aaa bbb ccc' -MaxWidth 7 -Measure $len)
+    Assert-Equal @('kurz', 'sehrlangeswort', 'x') (Split-TextToWidth -Text 'kurz sehrlangeswort x' -MaxWidth 6 -Measure $len)
+    Assert-Equal @('passt genau') (Split-TextToWidth -Text 'passt genau' -MaxWidth 11 -Measure $len)
+    Assert-Equal 1 (Split-TextToWidth -Text '' -MaxWidth 5 -Measure $len).Count
+}
 Test-Case 'Get-ErrorLine (Migrationsfehler mit ^), Format-Size' {
     $l = @('Führe 1 Migration(en) aus', '  [FEHLER] Migration 9999_kaputt.sql fehlgeschlagen: SQLSTATE[42601]', 'LINE 1: SELECT kaputt(;', '                      ^')
     Assert ((Get-ErrorLine $l) -match '9999_kaputt') (Get-ErrorLine $l)

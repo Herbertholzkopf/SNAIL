@@ -2047,17 +2047,19 @@ function ConvertTo-Megabytes {
  "php bin\console <Befehl>" im Programmordner. Zeilen mit einem Passwort
  (user:create: "Initiales Passwort: ...") kommen nicht ins Protokoll.
 #>
+# -ExitCodeChecked: einen Exit-Code ungleich 0 wertet der Aufrufer aus (z. B.
+# user:create bei vorhandenem Benutzer) - dann keine Error-Zeile im Protokoll
 function Invoke-Console {
-    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSec = 600)
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSec = 600, [switch]$ExitCodeChecked)
     $console = Join-Path (Join-Path $Plan.ProgDir 'bin') 'console'
     if (-not (Test-Path -LiteralPath $console)) { throw "Projekt-Konsole nicht gefunden: $console" }
     Write-Log ("php bin\console {0}" -f ($Arguments -join ' '))
     $r = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs (@($console) + $Arguments)) -WorkingDirectory $Plan.ProgDir -Utf8Output -TimeoutSec $TimeoutSec
     foreach ($l in $r.Lines) {
         $shown = if ($l -match 'Passwort:\s*\S') { ($l -replace '(Passwort:\s*).*$', '$1********') } else { $l }
-        Write-Log ('  ' + $shown) $(if ($r.ExitCode -eq 0) { 'Info' } else { 'Warn' })
+        Write-Log ('  ' + $shown) $(if ($r.ExitCode -eq 0 -or $ExitCodeChecked) { 'Info' } else { 'Warn' })
     }
-    Write-Log ("Exit-Code {0}" -f $r.ExitCode) $(if ($r.ExitCode -eq 0) { 'Ok' } else { 'Error' })
+    Write-Log ("Exit-Code {0}" -f $r.ExitCode) $(if ($r.ExitCode -eq 0) { 'Ok' } elseif ($ExitCodeChecked) { 'Info' } else { 'Error' })
     return $r
 }
 
@@ -2088,7 +2090,7 @@ function Invoke-ConsoleUserCreate {
     $a = $Plan.Inst.Admin
     $cmdArgs = @('user:create', $a.Login, $a.Name, 'admin')
     if ($Email) { $cmdArgs += $Email }
-    $r = Invoke-Console -Plan $Plan -Arguments $cmdArgs -TimeoutSec 120
+    $r = Invoke-Console -Plan $Plan -Arguments $cmdArgs -TimeoutSec 120 -ExitCodeChecked
     $all = $r.Lines -join "`n"
     if ($r.ExitCode -eq 0) {
         if ($all -match 'Initiales Passwort:\s*(\S+)') {
@@ -3236,17 +3238,38 @@ function New-ListBox {
     return $lv
 }
 
+# Text in Zeilen aufteilen, die hoechstens MaxWidth breit sind (Umbruch an
+# Leerzeichen; ein zu langes Wort bleibt ganz). -Measure liefert die Breite.
+function Split-TextToWidth {
+    param([string]$Text, [int]$MaxWidth, [Parameter(Mandatory)][scriptblock]$Measure)
+    $lines = New-Object System.Collections.Generic.List[string]
+    $cur = ''
+    foreach ($w in ($Text -split ' ')) {
+        $try = if ($cur) { "$cur $w" } else { $w }
+        if ($cur -and (& $Measure $try) -gt $MaxWidth) { $lines.Add($cur); $cur = $w } else { $cur = $try }
+    }
+    $lines.Add($cur)
+    return , $lines.ToArray()
+}
+
+# Ergebniszeile; ein langer Text geht in Folgezeilen weiter (die Liste kann
+# nicht umbrechen, und der Tooltip ragt bei langen Texten aus dem Fenster)
 function Add-ResultRow {
     param($List, [string]$Level, [string]$Name, [string]$Text)
     $sym = switch ($Level) { 'Ok' { [char]0x2713 } 'Warn' { [char]0x26A0 } 'Error' { [char]0x2717 } default { [char]0x2139 } }
     $col = switch ($Level) { 'Ok' { $script:ColOk } 'Warn' { $script:ColWarn } 'Error' { $script:ColErr } default { $script:ColGray } }
-    $item = New-Object System.Windows.Forms.ListViewItem([string]$sym)
-    [void]$item.SubItems.Add($Name)
-    [void]$item.SubItems.Add($Text)
-    $item.ToolTipText = $Text
-    $item.ForeColor = $col
-    $item.UseItemStyleForSubItems = $true
-    [void]$List.Items.Add($item)
+    $font = $List.Font
+    $measure = { param($s) [System.Windows.Forms.TextRenderer]::MeasureText($s, $font).Width }.GetNewClosure()
+    $parts = Split-TextToWidth -Text $Text -MaxWidth ($List.Columns[2].Width - 12) -Measure $measure
+    for ($k = 0; $k -lt $parts.Count; $k++) {
+        $item = New-Object System.Windows.Forms.ListViewItem($(if ($k -eq 0) { [string]$sym } else { '' }))
+        [void]$item.SubItems.Add($(if ($k -eq 0) { $Name } else { '' }))
+        [void]$item.SubItems.Add($parts[$k])
+        $item.ToolTipText = $(if ($parts.Count -eq 1) { $Text } else { '' })   # umbrochen: alles sichtbar
+        $item.ForeColor = $col
+        $item.UseItemStyleForSubItems = $true
+        [void]$List.Items.Add($item)
+    }
 }
 
 # Beschriftung + Textfeld in einer Zeile
