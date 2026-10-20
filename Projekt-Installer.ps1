@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 6.0
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.1
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.3+, IIS, PostgreSQL, config.php) auf einem Windows Server, der vorher
@@ -129,7 +129,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '6.0'
+$script:AppVersion = '7.1'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -481,7 +481,7 @@ function Initialize-SnailDir {
 
 $script:JsonTemplate = @'
 {
-  "_doku": "Katalog fuer SNAIL 6 (projektvorlage: PHP, IIS, PostgreSQL, config.php). Liegt neben der EXE, wird mit SNAIL ausgeliefert und bei jedem Update mitkopiert. Er nennt nur die Programme ('dienste'); was auf dem Server installiert ist, liest SNAIL aus C:\\AK\\*\\config.php. Mandant, Port, Adresse usw. werden bei der Neuinstallation eingegeben.",
+  "_doku": "Katalog fuer SNAIL 7 (projektvorlage: PHP, IIS, PostgreSQL, config.php). Liegt neben der EXE, wird mit SNAIL ausgeliefert und bei jedem Update mitkopiert. Er nennt nur die Programme ('dienste'); was auf dem Server installiert ist, liest SNAIL aus C:\\AK\\*\\config.php. Mandant, Port, Adresse usw. werden bei der Neuinstallation eingegeben.",
   "format": 1,
 
   "einstellungen": {
@@ -617,7 +617,7 @@ function ConvertFrom-ProjectJson {
     $result = [pscustomobject]@{ Settings = $settings; Services = @{}; ServiceList = @(); Errors = $errors }
 
     if ($null -ne $Json.projekte -and $null -eq $Json.dienste) {
-        $errors.Add('Diese projekte.json hat das alte Format (Projektliste mit MySQL und .env). SNAIL 6 braucht den Katalog im Format 1 ("Vorlage anlegen").')
+        $errors.Add('Diese projekte.json hat das alte Format (Projektliste mit MySQL und .env). SNAIL 7 braucht den Katalog im Format 1 ("Vorlage anlegen").')
         return $result
     }
     if ([string]$Json.format -ne [string]$script:FormatVersion) {

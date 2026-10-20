@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-SNAIL 6 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 

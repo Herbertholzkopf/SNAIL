@@ -1,5 +1,5 @@
 {
-  "_doku": "Katalog fuer SNAIL 6 (projektvorlage: PHP, IIS, PostgreSQL, config.php). Liegt neben der EXE, wird mit SNAIL ausgeliefert und bei jedem Update mitkopiert. Er nennt nur die Programme ('dienste'); was auf dem Server installiert ist, liest SNAIL aus C:\\AK\\*\\config.php. Mandant, Port, Adresse usw. werden bei der Neuinstallation eingegeben. Erklaerung aller Felder: README.md.",
+  "_doku": "Katalog fuer SNAIL 7 (projektvorlage: PHP, IIS, PostgreSQL, config.php). Liegt neben der EXE, wird mit SNAIL ausgeliefert und bei jedem Update mitkopiert. Er nennt nur die Programme ('dienste'); was auf dem Server installiert ist, liest SNAIL aus C:\\AK\\*\\config.php. Mandant, Port, Adresse usw. werden bei der Neuinstallation eingegeben. Erklaerung aller Felder: README.md.",
   "format": 1,
   "einstellungen": {
     "_doku": "programmOrdner: Programme (C:\\AK\\<Ordner>), dort liegen auch services.json und logos. datenOrdner: Vorschlag fuer Data/Cache/Logs/Temp (D:\\AK\\<Ordner>; fehlt das Laufwerk: C:\\AKDaten\\<Ordner>). portStart: ab hier schlaegt SNAIL den naechsten freien Port vor. phpExe/psqlBin/postgresPort nur setzen, um die WIPP-Dateien in C:\\ProgramData\\WIPP zu uebersteuern (leer/0 = automatisch).",
