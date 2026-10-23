@@ -3,12 +3,12 @@
 Was sich unter Linux prüfen ließ, ist geprüft (Parser, PSScriptAnalyzer und `tests/SNAIL.Tests.ps1`:
 Katalog, Eingaben, Ports, Datenpfade, `config.php` gegen die echte `config.example.php`,
 `services.json` gegen `ServiceDirectory::parse()` der Vorlage, Erkennung der Installationen über
-`php bin\console info`, Kollisionen von Datenbank/Rolle und Ordnername, psql-Schritte gegen PostgreSQL 16, Durchlauf ZIP → `config.php` → `migrate`
+`php bin\console info`, Kollisionen von Datenbank/Rolle und Ordnername, psql-Schritte gegen PostgreSQL 18 (PHP 8.5), Ergänzen von `app.key` in einer vorhandenen `config.php`, Durchlauf ZIP → `config.php` → `migrate`
 → `user:create` → `check`). Hier steht, was nur Windows zeigen kann: Oberfläche, appcmd, icacls,
 robocopy, Firewall, Windows-Aufgabe, `windows-pruefung.ps1` unter 5.1, WIPP-Dateien.
 
 Alle Befehle in einer **Windows PowerShell 5.1 als Administrator**. `$pg` meint
-`C:\Program Files\PostgreSQL\17\bin`, `$appcmd` meint `& "$env:windir\System32\inetsrv\appcmd.exe"`.
+`C:\Program Files\PostgreSQL\18\bin`, `$php` meint `(Get-Content C:\ProgramData\WIPP\php-pfad.txt)`, `$appcmd` meint `& "$env:windir\System32\inetsrv\appcmd.exe"`.
 „SNAIL starten“: `powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File C:\SNAIL\Projekt-Installer.ps1`.
 
 Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.2“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.3“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -50,7 +50,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 |---|---|---|
 | 2.1 | „Installieren“ → Bestätigung | nennt Ordner/Site/Pool `projekt`, Programm, Daten, Port 21100, Adresse `http://localhost:21100/`, Datenbank `projekt` (Rolle `projekt_user`) |
 | 2.2 | „Ja“, Durchlauf abwarten | alle Schritte ✓ (⚠ bei `check` erlaubt): Programmcode, Datenordner, IIS, Rechte, PostgreSQL, config.php, migrate, user:create, services.json, Windows-Aufgabe, check, windows-pruefung. Kein Schritt „Firewallregel“ |
-| 2.3 | Seite „Fertig“ | „Die Anwendung läuft unter http://localhost:21100/ … Selbstprüfung bestanden“; Anmeldung `admin`, Initialpasswort, DB-Passwort, Ordner; Hinweise: „Windows-Aufgabe '\AK\projekt Aufgabenplanung' eingerichtet - erster Lauf ohne Fehler“, „windows-pruefung.ps1 **0 Fehler** …“ |
+| 2.3 | Seite „Fertig“ | „Die Anwendung läuft unter http://localhost:21100/ … Selbstprüfung bestanden“; Anmeldung `admin`, Initialpasswort, DB-Passwort, `app.key` (44 Zeichen, „bei dieser Installation erzeugt“), Ordner; Hinweise: „Windows-Aufgabe '\AK\projekt Aufgabenplanung' eingerichtet - erster Lauf ohne Fehler“, „windows-pruefung.ps1 **0 Fehler** …“ |
 | 2.4 | „Anwendung öffnen“, mit `admin` und Initialpasswort anmelden | Passwortwechsel erzwungen; Benutzer-Menü zeigt **„Jörg Müller“ mit Umlauten** (prüft die Übergabe an `php.exe`); App-Switcher zeigt „Projektvorlage“ |
 | 2.5 | `$appcmd list apppool projekt /text:*` | `managedRuntimeVersion:""`, `processModel.identityType:"ApplicationPoolIdentity"` |
 | 2.6 | `$appcmd list site projekt`, `$appcmd list vdir "projekt/"` | Binding `http/*:21100:`, `physicalPath:C:\AK\projekt\public` |
@@ -59,7 +59,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 | 2.9 | Prozess-Mitschnitt stoppen; `Select-String C:\cmdlines.txt -SimpleMatch '<DB-Passwort>'`, ebenso Superuser- und Initialpasswort | **keine Treffer** |
 | 2.10 | `Get-Content C:\AK\projekt\config.php -Encoding Byte -TotalCount 5`; Datei ansehen | `60 63 112 104 112` (kein BOM); `'service' => 'projekt'`, `'installation' => 'muster'`, `'url' => 'http://localhost:21100/'`, `'data' => 'D:\\AK\\projekt\\Data'`, `'max_mb' => 250`, `'name' => ''` bei `session` |
 | 2.11 | `php C:\AK\projekt\bin\console check` | `Ergebnis: Alles in Ordnung.` (oder „OK mit Warnungen“), `$LASTEXITCODE` 0; keine Warnung zu services.json oder Aufgabenplanung |
-| 2.12 | `Get-Content C:\AK\services.json`; `C:\ProgramData\SNAIL\zugangsdaten\projekt.txt` + `icacls` darauf; neuestes `snail_*.log` nach dem Initialpasswort durchsuchen | services.json: Dienst `projekt`, `installations` als Liste mit `muster` / „Muster GmbH“ / `http://localhost:21100/`, ohne BOM. Zugangsdaten wie auf „Fertig“, nur Administratoren/SYSTEM. Log: „Initiales Passwort: ********“ |
+| 2.12 | `Get-Content C:\AK\services.json`; `C:\ProgramData\SNAIL\zugangsdaten\projekt.txt` + `icacls` darauf; neuestes `snail_*.log` nach dem Initialpasswort durchsuchen | services.json: Dienst `projekt`, `installations` als Liste mit `muster` / „Muster GmbH“ / `http://localhost:21100/`, ohne BOM. Zugangsdaten wie auf „Fertig“ (mit `app_key` und dem Hinweis „mit der config.php sichern …“), nur Administratoren/SYSTEM. Log: „Initiales Passwort: ********“ |
 | 2.13 | `Get-NetFirewallRule -Name SNAIL-* -ErrorAction SilentlyContinue` | keine Regel |
 
 ## 3 Zweiter Mandant desselben Dienstes (B), gleicher Mandant in zweitem Dienst (C)
@@ -85,7 +85,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 |---|---|---|
 | 4.1 | Auswahl: „Projektvorlage - Muster GmbH“ (oben) → „Weiter“ | direkt „Prüfen“ (keine Angaben-Seite); Radio „Vorhandenen Programmordner nutzen … (= Einrichtung wiederholen; ZIP = Aktualisieren)“; ℹ Modus „Einrichtung wiederholen …“; ✓ Installation „projekt/muster in C:\AK\projekt, Version …“; ✓ Website „… wird angeglichen, Bindings bleiben.“; ✓ config.php „vorhanden - bleibt unverändert“ |
 | 4.2 | Vorher: `$appcmd set site projekt /+bindings.[protocol='http',bindingInformation='*:21199:']`; Hash merken: `Get-FileHash C:\AK\projekt\config.php` | – |
-| 4.3 | „Installieren“ | alle Schritte ✓; Protokoll „Website 'projekt' vorhanden - Bindings bleiben unverändert (http/*:21100:,http/*:21199:)“, „1 Benutzerkonto(en) vorhanden - kein neuer Administrator“; „Fertig“: „Die vorhandene config.php wurde übernommen.“ |
+| 4.3 | „Installieren“ | alle Schritte ✓ (auch „config.php: app.key nachtragen, falls er fehlt“ – Protokoll „app.key ist gesetzt und gültig - config.php unverändert.“); Protokoll „Website 'projekt' vorhanden - Bindings bleiben unverändert (http/*:21100:,http/*:21199:)“, „1 Benutzerkonto(en) vorhanden - kein neuer Administrator“; „Fertig“: „app.key : vorhanden, unverändert“, „Die vorhandene config.php wurde übernommen.“ |
 | 4.4 | `$appcmd list site projekt`; Hash der `config.php`; Anmeldung mit dem Passwort aus 2.4 | Bindings **beide** noch da; Hash unverändert; Anmeldung klappt |
 | 4.5 | Zusatzbinding entfernen: `$appcmd set site projekt /-bindings.[protocol='http',bindingInformation='*:21199:']` | – |
 
@@ -96,7 +96,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 | 5.1 | Neuen Stand bauen: ZIP nach `C:\neu` entpacken, in `C:\neu\projektvorlage-main\config\app.php` `'version' => '0.1.1'` setzen, `C:\neu\projektvorlage-main\NEU.txt` anlegen, `Compress-Archive C:\neu\projektvorlage-main C:\SNAIL\projektvorlage-neu.zip` | ZIP mit Zwischenordner |
 | 5.2 | `New-Item C:\AK\projekt\ALT.txt`; Hash der `config.php` merken | – |
 | 5.3 | Auswahl A → ZIP `C:\SNAIL\projektvorlage-neu.zip` → „Erneut prüfen“ | ℹ Modus „Aktualisieren: … -> 0.1.1 …“, ℹ Sicherung „pg_dump + config.php nach D:\AK\projekt\Sicherung\<Zeit> - vorhanden: noch keine …“; Abschnitt „Sicherung vor dem Aktualisieren“ sichtbar; Schaltfläche „Aktualisieren“ |
-| 5.4 | „Aktualisieren“ | Schritte: Sicherung, Programmcode aktualisieren (robocopy /MIR), Datenordner, IIS, Rechte, migrate, services.json, Windows-Aufgabe, check, windows-pruefung – alle ✓; **kein** PostgreSQL-, config.php- oder user:create-Schritt. „Fertig“: Zeile „Sicherung : D:\AK\projekt\Sicherung\<Zeit> (32 KB)“ – Dump und config.php zusammen, wie auf „Prüfen“ (kleine Sicherungen in KB), Hinweis zu neuen Konfigurationsschlüsseln, Schaltfläche „config.php öffnen“ |
+| 5.4 | „Aktualisieren“ | Schritte: Sicherung, Programmcode aktualisieren (robocopy /MIR), Datenordner, IIS, Rechte, config.php: app.key nachtragen, migrate, services.json, Windows-Aufgabe, check, windows-pruefung – alle ✓; **kein** PostgreSQL-, config.php- oder user:create-Schritt. „Fertig“: Zeile „Sicherung : D:\AK\projekt\Sicherung\<Zeit> (32 KB)“ – Dump und config.php zusammen, wie auf „Prüfen“ (kleine Sicherungen in KB), Hinweis zu neuen Konfigurationsschlüsseln, Schaltfläche „config.php öffnen“ |
 | 5.5 | Programmordner prüfen | `NEU.txt` da, `ALT.txt` weg, `src\Support\Config.php` **vorhanden**, `config.php`-Hash unverändert; `icacls C:\AK\projekt\NEU.txt` nur geerbt |
 | 5.6 | `icacls D:\AK\projekt\Sicherung`; Inhalt; `& $pg\pg_restore.exe -l <dump>` | nur Administratoren/SYSTEM, keine geerbten Einträge (kein App-Pool); `projekt.dump` und `config.php`; pg_restore listet Tabellen |
 | 5.7 | Protokoll | „App-Pool 'projekt' angehalten.“ vor robocopy, „… gestartet.“ danach; robocopy-Exitcode < 8 |
@@ -164,8 +164,43 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.2.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.3.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
+
+## 11 app.key (SNAIL 7.3)
+
+Für einen Computer-Use-Lauf auf **SRV-Test** gedacht: jeden Schritt der Reihe nach ausführen, das Erwartete vergleichen, Abweichungen mit Nummer und Bildschirmfoto festhalten. Den Schlüssel selbst nie in Berichte oder Chats kopieren – vergleichen genügt (z. B. die ersten und letzten 4 Zeichen nennen).
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 11.0 | ZIPs bereitlegen: projektvorlage **v0.39** (`main`, Commit `2a90efd`) als `C:\SNAIL\projektvorlage-v0.39.zip` und **v0.37** (Commit `e2a259990063407c66524d71d125e88c4b12e167`, „Code → Download ZIP“ auf dem Commit bzw. `…/archive/e2a259990063407c66524d71d125e88c4b12e167.zip`) als `C:\SNAIL\projektvorlage-v0.37.zip` | beide ZIPs vorhanden; `& $php -v` meldet 8.5 |
+| | **A – Neuinstallation v0.39** | |
+| 11.1 | SNAIL starten → Katalog „Projektvorlage“ → „(neuer Mandant)“, Schlüssel `schluessel`, Name `Schlüssel-Test` → „Weiter“ → ZIP `projektvorlage-v0.39.zip` → „Erneut prüfen“ → „Installieren“ | Ordner `projekt-schluessel`; alle Schritte ✓ (⚠ bei `check` erlaubt); **kein** Schritt „config.php: app.key nachtragen“ |
+| 11.2 | Seite „Fertig“ | Zeile „app.key : <44 Zeichen, endet auf => (bei dieser Installation erzeugt - mit der config.php sichern, im Passwortmanager ablegen)“; Wert markieren und kopieren lässt sich |
+| 11.3 | `Select-String C:\AK\projekt-schluessel\config.php -Pattern "'key'","'key_previous'","'redirect_to'","'CONFIG_VERSION'"` | `'key' => '<derselbe Wert wie auf „Fertig“>'`, `'key_previous' => ''`, `'redirect_to' => ''`, `'CONFIG_VERSION' => 4` |
+| 11.4 | `Select-String C:\ProgramData\SNAIL\zugangsdaten\projekt-schluessel.txt -Pattern 'app_key'` | Kommentar „app_key (= app.key in der config.php): mit der config.php sichern und im Passwortmanager ablegen - ohne ihn sind gespeicherte Passwoerter verloren.“ und `app_key=<derselbe Wert>` |
+| 11.5 | `& $php C:\AK\projekt-schluessel\bin\console check; $LASTEXITCODE` | `[OK     ] Schlüssel für Geheimnisse (app.key)`; keine Zeile „In der config.php fehlen …“ oder „CONFIG_VERSION ist …“; Exit 0 |
+| 11.6 | `Select-String C:\ProgramData\SNAIL\snail_*.log -SimpleMatch '<Schlüssel>'` (und `C:\cmdlines.txt`, falls der Mitschnitt aus 0.5 läuft) | **keine Treffer** |
+| | **B – Update einer v0.37-Installation** | |
+| 11.7 | Katalog „Projektvorlage“ → neuer Mandant `alt` / `Alt-Test` → ZIP `projektvorlage-v0.37.zip` → „Installieren“ | Ordner `projekt-alt`, alle Schritte ✓; „Fertig“ **ohne** Zeile „app.key“; `Select-String C:\AK\projekt-alt\config.php -Pattern "'CONFIG_VERSION'","'key'"` → nur `'CONFIG_VERSION' => 3` |
+| 11.8 | Vorher-Stand merken: `(Get-FileHash C:\AK\projekt-alt\config.php).Hash` notieren; `& $php -r 'echo json_encode(require $argv[1]);' C:\AK\projekt-alt\config.php \| Set-Content C:\vorher.json` | Hash notiert, `C:\vorher.json` vorhanden |
+| 11.9 | Auswahl „Projektvorlage - Alt-Test“ → „Weiter“ → ZIP `projektvorlage-v0.39.zip` → „Erneut prüfen“ | ℹ Modus „Aktualisieren: … (… config.php bleibt, nur ein fehlender app.key wird nachgetragen)“; ✓ config.php „vorhanden - bleibt unverändert, nur fehlende app.key/app.key_previous/mail.redirect_to werden nachgetragen …“ |
+| 11.10 | „Aktualisieren“ | Schritt „config.php: app.key nachtragen, falls er fehlt“ ✓; Protokoll „Ergänzt: app.key, app.key_previous, mail.redirect_to, CONFIG_VERSION (php -l und Vergleich ohne Befund, alle anderen Werte unverändert). Vorheriger Stand: D:\AK\projekt-alt\Sicherung\config.php.vor-snail-<Zeit>“ – **ohne** den Schlüssel |
+| 11.11 | Seite „Fertig“ | „app.key : <44 Zeichen> (in die vorhandene config.php nachgetragen - sichern, im Passwortmanager ablegen)“, „Vorher : D:\AK\projekt-alt\Sicherung\config.php.vor-snail-<Zeit> (…)“; Hinweis „… nur für Administratoren lesbar; SNAIL löscht sie nicht automatisch.“ |
+| 11.12 | `Select-String C:\AK\projekt-alt\config.php -Pattern 'von SNAIL',"'key'","'key_previous'","'redirect_to'","'CONFIG_VERSION'"` | zwei Kommentarzeilen „// von SNAIL ergaenzt …“ (in `app` und `mail`), `'key' => '<Wert von „Fertig“>'`, `'key_previous' => ''`, `'redirect_to' => ''`, `'CONFIG_VERSION' => 4`; alle anderen Zeilen/Kommentare wie vorher (Datei in Notepad ansehen) |
+| 11.13 | Alle anderen Werte gleich: `& $php -r '$a = json_decode(file_get_contents($argv[1]), true); $b = require $argv[2]; unset($b[''app''][''key''], $b[''app''][''key_previous''], $b[''mail''][''redirect_to''], $a[''CONFIG_VERSION''], $b[''CONFIG_VERSION'']); echo $a === $b ? ''gleich'' : ''ABWEICHUNG'';' C:\vorher.json C:\AK\projekt-alt\config.php` | `gleich` |
+| 11.14 | `Get-ChildItem D:\AK\projekt-alt\Sicherung -Filter config.php.vor-snail-*`; `(Get-FileHash <diese Datei>).Hash`; `icacls <diese Datei>`; `icacls C:\AK\projekt-alt\config.php` | genau **eine** Datei; Hash = Wert aus 11.8; nur Administratoren/SYSTEM (kein App-Pool, kein „Benutzer“); `config.php` weiterhin nur geerbte Rechte (I) wie in 2.8 |
+| 11.15 | `& $php C:\AK\projekt-alt\bin\console check; $LASTEXITCODE`; `Select-String C:\ProgramData\SNAIL\zugangsdaten\projekt-alt.txt -Pattern '^app_key='` | `[OK     ] Schlüssel für Geheimnisse (app.key)`, keine Zeile zu fehlenden Schlüsseln oder `CONFIG_VERSION`, Exit 0; `app_key=` mit dem Wert von „Fertig“ |
+| 11.16 | `Select-String C:\ProgramData\SNAIL\snail_*.log -SimpleMatch '<Schlüssel aus 11.11>'` | **keine Treffer** |
+| | **C – zweiter Lauf ändert nichts, vorhandener Schlüssel bleibt** | |
+| 11.17 | Hash der `config.php` von `projekt-alt` notieren → Auswahl „Alt-Test“ → **ohne** ZIP („Vorhandenen Programmordner nutzen“) → „Installieren“ | Schritt „config.php: app.key nachtragen“ ✓, Protokoll „app.key ist gesetzt und gültig - config.php unverändert.“; „Fertig“: „app.key : vorhanden, unverändert“ (ohne Wert) |
+| 11.18 | Hash der `config.php`; `Get-ChildItem D:\AK\projekt-alt\Sicherung -Filter config.php.vor-snail-*` | Hash **unverändert**; weiterhin genau eine Sicherungsdatei |
+| 11.19 | Noch einmal **Aktualisieren** mit `projektvorlage-v0.39.zip` (Sicherung nicht abwählen) | wie 11.17/11.18: Hash unverändert, keine neue `config.php.vor-snail-*`, `app.key` derselbe wie in 11.11 |
+| | **D – ungültiger Schlüssel und Selbsteintragen** | |
+| 11.20 | In `C:\AK\projekt-alt\config.php` (Notepad als Administrator) den Wert von `'key'` durch `'kaputt'` ersetzen, speichern, Hash notieren → „Alt-Test“ ohne ZIP → „Installieren“ | Schritt „config.php: app.key nachtragen“ ⚠, Protokoll „app.key in der config.php ist kein gültiger Schlüssel … SNAIL ändert nichts …“; danach bricht `check` mit `[FEHLER ]` zu app.key ab (erwartet – ein falscher Schlüssel ist für die Vorlage ein Fehler; „Fertig“ erscheint deshalb nicht). Hash **unverändert**; keine neue Sicherungsdatei |
+| 11.21 | Den richtigen Schlüssel aus `zugangsdaten\projekt-alt.txt` wieder eintragen; `& $php C:\AK\projekt-alt\bin\console check` | `[OK     ] Schlüssel für Geheimnisse (app.key)` |
+| 11.22 | In `C:\AK\projekt-schluessel\config.php` die Zeile `'key' => '…',` durch **zwei** Zeilen `'key' => '',` ersetzen, Hash notieren → „Schlüssel-Test“ ohne ZIP → „Installieren“ | Schritt ⚠; Hinweis „config.php nicht geändert: app.key steht mehrfach in der config.php …“; „Fertig“: „app.key : NICHT eingetragen …“ mit einem Vorschlag (44 Zeichen) und den Zeilen „Gilt erst, wenn er in der config.php … steht. NUR eintragen, wenn app.key dort wirklich fehlt oder leer ist …“; Hash **unverändert**; keine `config.php.vor-snail-*` in `D:\AK\projekt-schluessel\Sicherung` |
+| 11.23 | Aufräumen: in `projekt-schluessel\config.php` wieder **eine** Zeile mit dem Schlüssel aus `zugangsdaten\projekt-schluessel.txt`; `Remove-Item C:\vorher.json` | `check` von `projekt-schluessel`: app.key OK; `C:\vorher.json` weg (enthielt das DB-Passwort) |
 
 ## Ergebnis festhalten
 
