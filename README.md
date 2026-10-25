@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.4**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -291,7 +291,7 @@ Was nur Windows zeigen kann (Oberfläche, appcmd, icacls, robocopy, Firewall, Wi
 - **appcmd statt WebAdministration** – das Modul lädt nicht überall zuverlässig und gar nicht unter PowerShell 7. Argumente für appcmd bleiben wie bisher (`/userName:""` muss unverändert ankommen); alle anderen Programme bekommen ihre Argumente nach den Regeln von `CommandLineToArgvW` maskiert.
 - **Programme ohne Fenster** über `System.Diagnostics.Process`, Ausgabe von `php.exe`/`psql` als UTF-8, Standardeingabe als UTF-8 ohne BOM direkt in den Datenstrom, immer geschlossen.
 - **Upload-Grenze** je Website `uploads.max_mb + 1 MB` (Rahmen einer multipart-Anfrage); ein höherer gültiger Wert wird nie gesenkt. Nicht in `public\web.config` – die überschreibt jedes Update.
-- **Prüfen vor Ändern:** Die ZIP wird schon auf „Prüfen“ entpackt, damit Aufbau und `requirements` (`php_min`, `postgres_min`, `extensions` aus `config/app.php`) feststehen, bevor etwas angelegt wird.
+- **Prüfen vor Ändern:** Die ZIP wird schon auf „Prüfen“ entpackt, damit Aufbau und `requirements` (`php_min`, `postgres_min`, `extensions` aus `config/app.php`) feststehen, bevor etwas angelegt wird. Version (und Name) des Programmcodes für „Neuinstallation, Version …“ bzw. „Aktualisieren: alt -> neu“ kommen aus `config/projekt/app.php` (Literal-Array `name`/`version`/`description`, überschreibt `config/app.php`), falls es die Datei gibt, sonst wie bisher aus `version` in `config/app.php`.
 - **Pfade ohne Laufwerksprüfung** (`[IO.Path]::Combine` statt `Join-Path`): ein Datenordner auf einem fehlenden Laufwerk wird gemeldet statt abzustürzen.
 - **Abbrechen:** „Fenster schließen“ während eines Schritts hält nach diesem Schritt an und schließt dann; ein laufendes Programm wird nicht hart beendet. Beim nächsten Lauf ist jeder Schritt wiederholbar; das DB-Passwort kommt dann aus der schon geschriebenen `config.php`.
 

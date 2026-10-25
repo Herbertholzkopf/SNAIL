@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.3“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.4“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.3.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.4.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -210,6 +210,7 @@ Für einen Computer-Use-Lauf auf **SRV-Test** gedacht: jeden Schritt der Reihe n
 | 12.1 | `werner-main.zip` (GitHub „Download ZIP“ von werner) nach `C:\SNAIL`; SNAIL starten | Katalog: Zeile „werner | werner | DMS“ mit Archiv-Symbol |
 | 12.2 | „werner“ → Mandant `muster` → „Weiter“ → ZIP `C:\SNAIL\projektvorlage-main.zip` wählen → „Erneut prüfen“ | ⚠ ZIP-Datei „Die ZIP ist fuer den Dienst 'projekt' gebaut (app.service in der config.example.php), gewaehlt ist 'werner' (werner) - passt die ZIP zum Katalog-Eintrag?“ |
 | 12.3 | ZIP `C:\SNAIL\werner-main.zip` (Vorschlag des Katalogs) → „Erneut prüfen“ | ✓ ZIP-Datei „… (Projektstamm 'werner-main' erkannt)“, **keine** ZIP-Warnung (vorausgesetzt, werner hat `'service' => 'werner'` in der `config.example.php`) |
+| 12.3a | – | ℹ Modus „Neuinstallation, Version …“ nennt die Version des Projekts aus `config/projekt/app.php` (z. B. 0.12), falls werner die Datei hat, sonst die aus `config/app.php` |
 | 12.4 | „Installieren“; danach `Get-Content C:\AK\services.json` | alle Schritte ✓; Dienst `werner` mit `"name": "werner"`, `"description": "DMS"`, `"icon": "archive"`, `"tone": "primary"` |
 | 12.5 | Auswahl „werner - Muster GmbH“ → ZIP `projektvorlage-main.zip` (Aktualisieren) → „Erneut prüfen“ | ⚠ ZIP-Datei wie in 12.2 – hier **nicht** aktualisieren, „Zur Auswahl“ |
 

@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.3
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.4
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -135,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.3'
+$script:AppVersion = '7.4'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -1271,10 +1271,13 @@ function Update-InstalledConfigKeys {
     return $res
 }
 
-# requirements und version aus config/app.php der Vorlage (ZIP oder Ordner)
+# requirements und version aus config/app.php der Vorlage (ZIP oder Ordner).
+# Name und Version des Projekts stehen seit der Vorlage mit config/projekt/app.php
+# dort (Literal-Array name/version/description, ueberschreibt config/app.php);
+# fehlt die Datei, gilt version aus config/app.php wie bisher.
 function Get-TemplateInfo {
     param([Parameter(Mandatory)][string]$Root, [string]$PhpExe)
-    $info = [pscustomobject]@{ Version = ''; PhpMin = '8.5.0'; PgMin = 18; Extensions = @('pdo_pgsql', 'mbstring', 'openssl', 'json', 'ctype', 'fileinfo', 'session'); ExampleService = '' }
+    $info = [pscustomobject]@{ Version = ''; PhpMin = '8.5.0'; PgMin = 18; Extensions = @('pdo_pgsql', 'mbstring', 'openssl', 'json', 'ctype', 'fileinfo', 'session'); ExampleService = ''; Name = '' }
     # app.service der config.example.php: fuer welchen Dienst ist der Programmcode gebaut?
     # (die Vorlage selbst: 'projekt'; nur Literale, deshalb gefahrlos per php -r)
     $example = Join-Path $Root 'config.example.php'
@@ -1288,13 +1291,15 @@ function Get-TemplateInfo {
     }
     $file = Join-Path (Join-Path $Root 'config') 'app.php'
     if (-not $PhpExe -or -not (Test-Path -LiteralPath $file)) { return $info }
-    $code = '$a = require $argv[1]; echo json_encode(["version" => $a["version"] ?? "", "requirements" => $a["requirements"] ?? null]);'
+    $projekt = [System.IO.Path]::Combine($Root, 'config', 'projekt', 'app.php')
+    $code = '$a = require $argv[1]; $p = is_file($argv[2]) ? require $argv[2] : []; if (!is_array($p)) { $p = []; } echo json_encode(["version" => (string) ($p["version"] ?? $a["version"] ?? ""), "name" => (string) ($p["name"] ?? $a["name"] ?? ""), "requirements" => $a["requirements"] ?? null]);'
     try {
-        $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', $code, $file)) -Utf8Output -TimeoutSec 60
+        $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', $code, $file, $projekt)) -Utf8Output -TimeoutSec 60
         $pos = $r.Output.IndexOf('{')
         if ($r.ExitCode -eq 0 -and $pos -ge 0) {
             $j = $r.Output.Substring($pos) | ConvertFrom-Json
             $info.Version = [string]$j.version
+            $info.Name = [string]$j.name
             if ($j.requirements) {
                 if ($j.requirements.php_min) { $info.PhpMin = [string]$j.requirements.php_min }
                 if ($j.requirements.postgres_min) { $info.PgMin = [int]$j.requirements.postgres_min }

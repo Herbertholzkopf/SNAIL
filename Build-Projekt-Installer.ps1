@@ -8,7 +8,7 @@
 [CmdletBinding()]
 param(
     [string]$IconFile = 'setup.ico',
-    [string]$Version  = '7.3.0.0'
+    [string]$Version  = '7.4.0.0'
 )
 
 $ErrorActionPreference = 'Stop'

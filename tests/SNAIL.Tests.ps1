@@ -779,6 +779,22 @@ Test-Case 'Expand-TemplateZip: Zwischenordner (auch doppelt) erkannt, Aufbau, Wi
     $info = Get-TemplateInfo -Root $st.Root -PhpExe $PhpExe
     Assert-Equal 'projekt' $info.ExampleService 'app.service der config.example.php'
     Assert-Equal '' (Get-TemplateInfo -Root $st.Root -PhpExe $null).ExampleService 'ohne php: leer'
+    # ohne config/projekt/app.php: version aus config/app.php
+    $app = Invoke-Php 'echo (require $argv[1])["version"];' @((Join-Path $st.Root 'config/app.php'))
+    Assert-Equal $app $info.Version 'Version aus config/app.php'
+    # mit config/projekt/app.php: Name und Version des Projekts haben Vorrang, requirements bleiben
+    $pr = Join-Path $tmp 'projektinfo'
+    New-Item -ItemType Directory -Path (Join-Path $pr 'config/projekt') -Force | Out-Null
+    Copy-Item (Join-Path $st.Root 'config/app.php') (Join-Path $pr 'config/app.php')
+    [System.IO.File]::WriteAllText((Join-Path $pr 'config/projekt/app.php'), "<?php`nreturn [`n    'name' => 'werner',`n    'version' => '0.12',`n    'description' => 'DMS',`n];`n")
+    $i2 = Get-TemplateInfo -Root $pr -PhpExe $PhpExe
+    Assert-Equal '0.12' $i2.Version 'Version aus config/projekt/app.php'
+    Assert-Equal 'werner' $i2.Name
+    Assert-Equal $info.PhpMin $i2.PhpMin 'requirements weiter aus config/app.php'
+    Assert-Equal ($info.Extensions -join ',') ($i2.Extensions -join ',')
+    # projekt/app.php ohne version: Rueckfall auf config/app.php
+    [System.IO.File]::WriteAllText((Join-Path $pr 'config/projekt/app.php'), "<?php`nreturn ['name' => 'werner'];`n")
+    Assert-Equal $app (Get-TemplateInfo -Root $pr -PhpExe $PhpExe).Version 'ohne version: aus config/app.php'
     Assert-Equal '8.5.0' $info.PhpMin; Assert-Equal 18 $info.PgMin; Assert ($info.Extensions -contains 'pdo_pgsql'); Assert ($info.Version -ne '')
 }
 
