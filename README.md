@@ -21,7 +21,7 @@ Es gibt keine zusätzliche Zustandsdatei: Wird der Katalog ausgetauscht, erkennt
 
 1. **Auswahl** – zwei Bereiche: „Auf diesem Server installiert“ (Dienst – Mandant, Ordner, Port, Adresse, Version) und „Katalog – neu installieren“.
 2. **Angaben** (nur Neuinstallation) – siehe [Eingabeseite](#eingabeseite).
-3. **Prüfen** – bevor irgendetwas geändert wird: Administrator, IIS/appcmd, URL Rewrite, WebDAV (Warnung), Windows-Firewall aktiv (Warnung), PHP-Version und -Module nach `requirements` der Vorlage, Python (falls `braucht`), psql, PostgreSQL erreichbar und Superuser-Anmeldung, Programmcode nach Vorlage aufgebaut, Port frei, Datenpfade, Datenbank, `services.json`, Mandanten-Schlüssel, Logo. Eingaben: ZIP-Datei oder vorhandener Programmordner, beim Aktualisieren die Sicherung, Superuser-Passwort (mit „Verbindung testen“).
+3. **Prüfen** – bevor irgendetwas geändert wird: Administrator, IIS/appcmd, URL Rewrite, WebDAV (Warnung), Windows-Firewall aktiv (Warnung), PHP-Version und -Module nach `requirements` der Vorlage, Python (falls `braucht`), psql, PostgreSQL erreichbar und Superuser-Anmeldung, Programmcode nach Vorlage aufgebaut, ZIP passt zum Katalog-Eintrag (Warnung, siehe unten), Port frei, Datenpfade, Datenbank, `services.json`, Mandanten-Schlüssel, Logo. Eingaben: ZIP-Datei oder vorhandener Programmordner, beim Aktualisieren die Sicherung, Superuser-Passwort (mit „Verbindung testen“).
 4. **Installation** – Schrittliste mit Live-Status und Protokoll daneben. Jeder Schritt ist wiederholbar; „Erneut versuchen“ macht dort weiter, wo es geklemmt hat.
 5. **Fertig** – Zugangsdaten zum Kopieren (auch `app.key`, wenn SNAIL ihn erzeugt oder nachgetragen hat), Sicherung (Ort, Größe), Hinweise von `php bin\console check`, Ergebnis von `tools\windows-pruefung.ps1`; Schaltflächen: Anwendung öffnen, lokal öffnen, `config.php` öffnen, Prüfbericht, Zugangsdaten-Datei, zurück zur Auswahl.
 
@@ -140,6 +140,10 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | `phpModule` | – | zusätzliche PHP-Module über `requirements.extensions` der Vorlage hinaus |
 | `braucht` | – | `["python"]`: SNAIL prüft, dass `python.exe` vorhanden ist (PATH, Registry; WIPP installiert es optional), und trägt den Pfad als `python.exe` in die `config.php` ein, **wenn** die `config.example.php` des Projekts diesen Schlüssel hat. Die Skripte laufen über den Aufgabenplaner der Anwendung (`tasks:run`), nicht als eigene Windows-Aufgaben |
 
+**ZIP und Katalog-Eintrag:** Auf „Prüfen“ warnt SNAIL, wenn die gewählte ZIP nicht zum Eintrag passt – zuerst nach `app.service` in der `config.example.php` der ZIP (die Vorlage selbst: `projekt`, werner: `werner`), sonst nach dem Projektstamm gegen den Namen der vorgeschlagenen ZIP (`zip` `werner-main.zip` → Projektstamm `werner-main`). Beim Aktualisieren gilt dasselbe gegen den installierten Dienst. Es bleibt eine Warnung: Ein Programm kann bewusst aus einer anderen ZIP installiert werden (z. B. die Vorlage als Renate zum Testen).
+
+Die Liste „Katalog – neu installieren“ zeigt Name, Schlüssel und Beschreibung in eigenen Spalten (z. B. „werner | werner | DMS“); in die `services.json` gehen `name` und `description` unverändert.
+
 Eine `projekte.json` im alten Format (Projektliste mit MySQL) lehnt SNAIL mit einem Hinweis ab; ein Feld `installationen` wird ignoriert und gemeldet.
 
 ## config.php
@@ -251,7 +255,7 @@ Neben die EXE gehören `projekte.json`, der Ordner `logos\` und gern die ZIP-Dat
 | Datei | Zweck |
 |---|---|
 | `Projekt-Installer.ps1` | SNAIL selbst (UTF-8 mit BOM, CRLF – beim Bearbeiten beibehalten) |
-| `projekte.json` | Katalog: Testdienst `projekt` (die Vorlage selbst) und die Programme aus SNAIL 5, noch ohne ZIP |
+| `projekte.json` | Katalog: Testdienst `projekt` (die Vorlage selbst), `werner` (das DMS, Beschreibung „DMS“, ZIP `werner-main.zip`) und die Programme aus SNAIL 5, noch ohne ZIP |
 | `logos/` | Logos des Katalogs |
 | `Build-Projekt-Installer.ps1` | erzeugt die verteilbare EXE |
 | `New-Icon.ps1` | wandelt ein PNG in eine `.ico` |
@@ -264,7 +268,7 @@ Neben die EXE gehören `projekte.json`, der Ordner `logos\` und gern die ZIP-Dat
 Unter Linux geprüft (PowerShell 7, PHP 8.5, PostgreSQL 18): Parser und PSScriptAnalyzer ohne Befund, dazu `tests/SNAIL.Tests.ps1` – lädt die Funktionen über den Parser (die Oberfläche startet nicht) und prüft gegen die echte projektvorlage:
 
 - Kommandozeilen-Maskierung als Rundreise über `php`
-- Katalog: Datei im Repository (Logos als Dateien), eingebaute Vorlage, Fehlerfälle, altes Format
+- Katalog: Datei im Repository (Logos als Dateien, werner mit Icon `archive` aus dem Designsystem der Vorlage), eingebaute Vorlage, Fehlerfälle, altes Format; ZIP passt/passt nicht zum Eintrag
 - Eingaben: Standardwerte, Fehlerfälle, Cloudflare/Mail, angepasste Pfade, zweiter Mandant (`<dienst>-<installation>`), schon installiert, belegter Name; Datenpfade (absolut, nicht im Programmordner, Temp/Data auf einem Laufwerk, UNC); Ports (IIS-Binding, Listener, `excludedportrange`, nächster freier); Firewall-Vorschau
 - `config.php` aus der echten `config.example.php`: Escaping, ohne BOM, `php -l`, Ladeversuch, Schlüssel-Abgleich, optionaler Schlüssel `python.exe`
 - `app.key`: Format (gegen `SecretBox::parseKey` der Vorlage), Neuinstallation, Vorlage ohne Schlüssel; Ergänzen als Text (Bereich vorhanden/fehlend/in einer Zeile/doppelt, Schlüssel leer/vorhanden/in `"…"`, letzte Zeile ohne Komma, verschachtelter `key`, CRLF, Kommentare bleiben) und als Datei (Update v0.37 → v0.39 mit Sicherung, `CONFIG_VERSION` 4 und `Config::comparisonMessages()` ohne Hinweis, zweiter Lauf ohne Änderung, vorhandener/leerer/ungültiger Schlüssel, BOM, Fallback zum Selbsteintragen, PHP-Vergleich ohne Werte in der Ausgabe), Zugangsdatei

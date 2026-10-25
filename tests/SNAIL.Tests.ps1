@@ -129,6 +129,16 @@ Test-Case 'Katalog im Repository: ohne Fehler, Logos als Dateien, keine Installa
     Assert ($null -eq $json.installationen) 'keine installationen im Katalog'
     Assert-Equal 21100 $catalog.Settings.PortStart
 }
+Test-Case 'Katalog: werner (DMS) mit eigener ZIP, Icon archive gibt es im Designsystem der Vorlage' {
+    $w = $catalog.Services['werner']
+    Assert ($null -ne $w) 'werner im Katalog'
+    Assert-Equal 'werner' $w.Name; Assert-Equal 'DMS' $w.Description; Assert-Equal 'archive' $w.Icon; Assert-Equal 'primary' $w.Tone
+    Assert-Equal 250 $w.UploadsMaxMb; Assert-Equal 0 @($w.PhpModules).Count
+    Assert-Equal 'werner-main.zip' ([System.IO.Path]::GetFileName($w.Zip))
+    Assert-Equal 'werner' $catalog.ServiceList[1].Key 'gleich nach der Vorlage'
+    $icons = [System.IO.File]::ReadAllText((Join-Path $Vorlage 'public/assets/ds/icons.svg'))
+    Assert ($icons.Contains('id="i-archive"')) 'Icon archive im Designsystem'
+}
 Test-Case 'Vorlage aus dem Skript ("Katalog-Vorlage anlegen") ist gueltig' {
     $t = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:JsonTemplate' }, $true)
     $text = $t.Right.Extent.Text -replace "^@'\r?\n", '' -replace "\r?\n'@$", ''
@@ -405,15 +415,17 @@ echo json_encode(['fehlt' => array_values(array_diff($e, $c)), 'zuviel' => array
 
 # =============================================================================
 Write-Host "`n== app.key (7.3): erzeugen, nachtragen, nie ueberschreiben"
-# config.example.php vor CONFIG_VERSION 4 (Stand v0.37): ohne app.key, app.key_previous, mail.redirect_to
-$exampleV3 = (($example -split "`n") | Where-Object { $_ -notmatch "^\s*'(key|key_previous|redirect_to)' =>" }) -join "`n"
+# Stand v0.39 (CONFIG_VERSION 4) und v0.37 (3, ohne app.key, app.key_previous, mail.redirect_to),
+# gebaut aus der aktuellen config.example.php - neuere Vorlagen haben eine hoehere Version
+$exampleV4 = $example -replace "'CONFIG_VERSION' => \d+,", "'CONFIG_VERSION' => 4,"
+$exampleV3 = (($exampleV4 -split "`n") | Where-Object { $_ -notmatch "^\s*'(key|key_previous|redirect_to)' =>" }) -join "`n"
 $exampleV3 = $exampleV3 -replace "'CONFIG_VERSION' => 4,", "'CONFIG_VERSION' => 3,"
 function Test-SecretBoxKey([string]$Key) {
     $code = 'require $argv[1]; require $argv[2]; echo App\Support\SecretBox::parseKey(trim(fgets(STDIN))) === null ? "nein" : "ja";'
     $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', $code, (Join-Path $Vorlage 'src/Support/SecretBoxException.php'), (Join-Path $Vorlage 'src/Support/SecretBox.php'))) -StdIn ($Key + "`n") -Utf8Output -TimeoutSec 60
     return ($r.Output.Trim() -eq 'ja')
 }
-function New-OldInstall([string]$Name, [string]$ExampleNow = $example, [string]$ExampleThen = $exampleV3) {
+function New-OldInstall([string]$Name, [string]$ExampleNow = $exampleV4, [string]$ExampleThen = $exampleV3) {
     $prog = Join-Path $tmp "appkey/$Name"
     New-Item -ItemType Directory -Path $prog -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $prog 'config.example.php'), $ExampleThen)
@@ -517,7 +529,7 @@ Test-Case 'Add-ConfigKeys: letzte Zeile ohne Komma, verschachtelter Bereich mit 
 Test-Case 'Add-ConfigKeys: CONFIG_VERSION nur von erlaubtem Wert, oberste Ebene wird nie eingefuegt' {
     $r = Add-ConfigKeys -Text $exampleV3 -Values ([ordered]@{ 'CONFIG_VERSION' = 4 }) -Allowed @{ 'CONFIG_VERSION' = @('3') }
     Assert ($r.Text -match "'CONFIG_VERSION' => 4,") 'angehoben'
-    $r = Add-ConfigKeys -Text $example -Values ([ordered]@{ 'CONFIG_VERSION' = 4 }) -Allowed @{ 'CONFIG_VERSION' = @('3') }
+    $r = Add-ConfigKeys -Text $exampleV4 -Values ([ordered]@{ 'CONFIG_VERSION' = 4 }) -Allowed @{ 'CONFIG_VERSION' = @('3') }
     Assert ($r.Error -ne '') 'Version 4 ist kein erlaubter alter Wert'
     $r = Add-ConfigKeys -Text "<?php`nreturn [`n    'app' => [`n    ],`n];" -Values ([ordered]@{ 'CONFIG_VERSION' = 4 })
     Assert ($r.Error -match 'oberster Ebene') $r.Error
@@ -566,7 +578,7 @@ Test-Case 'Vorhandener gueltiger Schluessel bleibt; nur fehlende Nachbarn ergaen
     Assert-Equal $key (Get-ConfigJson $plan).app.key 'Schluessel unveraendert'
 }
 Test-Case 'Leerer app.key in einer v4-config.php wird gefuellt; CONFIG_VERSION bleibt 4' {
-    $plan = New-OldInstall 'leer' $example $example
+    $plan = New-OldInstall 'leer' $exampleV4 $exampleV4
     $r = Update-InstalledConfigKeys -Plan $plan
     Assert-Equal 'added' $r.Status $r.Text
     Assert-Equal 'app.key' ($r.Changed -join ',')
@@ -574,7 +586,7 @@ Test-Case 'Leerer app.key in einer v4-config.php wird gefuellt; CONFIG_VERSION b
     Assert-Equal $r.Key $c.app.key; Assert-Equal 4 $c.CONFIG_VERSION
 }
 Test-Case 'Ungueltiger app.key: nichts geaendert, Warnung, keine Sicherung' {
-    $plan = New-OldInstall 'ungueltig' $example $example
+    $plan = New-OldInstall 'ungueltig' $exampleV4 $exampleV4
     $file = Join-Path $plan.ProgDir 'config.php'
     $t = ([System.IO.File]::ReadAllText($file) -replace "'key' => '',", "'key' => 'kaputt',") -replace "(?m)^\s*'redirect_to' => '',\r?\n", ''
     [System.IO.File]::WriteAllText($file, $t)
@@ -591,6 +603,7 @@ Test-Case 'Nicht automatisch moeglich (app in einer Zeile): Status manual mit Sc
     $bytes0 = [System.IO.File]::ReadAllBytes($file)
     $r = Update-InstalledConfigKeys -Plan $plan
     Assert-Equal 'manual' $r.Status $r.Text
+    Assert ($r.Text -match '\.$') "Satzende mit Punkt: $($r.Text)"
     Assert (Test-AppKey $r.Key) 'Vorschlag gueltig'
     Assert ($r.Text -notmatch 'GEHEIM') 'kein Wert in der Meldung'
     Assert-Equal ([Convert]::ToBase64String($bytes0)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file))) 'unveraendert'
@@ -599,7 +612,7 @@ Test-Case 'Nicht automatisch moeglich (app in einer Zeile): Status manual mit Sc
 Test-Case 'config.php mit BOM bleibt mit BOM; CONFIG_VERSION bleibt 3, wenn noch andere Schluessel fehlen' {
     $exV2 = $exampleV3 -replace "(?s)\s*// -+\s*// HTTP-Client.*?'http' => \[.*?\],", ''
     Assert ($exV2 -notmatch "'http' =>") 'Testvorlage ohne http'
-    $plan = New-OldInstall 'bom' $example $exV2
+    $plan = New-OldInstall 'bom' $exampleV4 $exV2
     $file = Join-Path $plan.ProgDir 'config.php'
     [System.IO.File]::WriteAllBytes($file, [byte[]](@(0xEF, 0xBB, 0xBF) + [System.IO.File]::ReadAllBytes($file)))
     $r = Update-InstalledConfigKeys -Plan $plan
@@ -690,6 +703,14 @@ function Test-WithVorlage([string]$Path) {
     return (Invoke-Php $code @($sd, $Path) | ConvertFrom-Json)
 }
 $svcA = [pscustomobject]@{ Key = 'olaf'; Name = 'Olaf'; Icon = 'package'; Tone = 'info'; Description = 'Warenwirtschaft' }
+Test-Case 'Merge-ServicesJson: werner aus dem Katalog -> name werner, description DMS, Vorlage liest es' {
+    $t = Merge-ServicesJson -Tree $null -Service $catalog.Services['werner'] -Installation ([pscustomobject]@{ Key = 'muster'; Name = 'Muster GmbH'; Url = 'http://localhost:21100/' })
+    $f = Join-Path $tmp 'services-werner.json'
+    [System.IO.File]::WriteAllText($f, (ConvertTo-ServicesJsonText -Tree $t))
+    $p = Test-WithVorlage $f
+    Assert ($null -eq $p.error) "Vorlage: $($p.error)"
+    Assert-Equal 'werner' $p.services[0].key; Assert-Equal 'werner' $p.services[0].name; Assert-Equal 'DMS' $p.services[0].description
+}
 Test-Case 'Merge-ServicesJson: neue Datei, zweite Installation, idempotent, Vorlage liest sie' {
     $t = Merge-ServicesJson -Tree $null -Service $svcA -LogoRel 'logos/olaf.svg' -Installation ([pscustomobject]@{ Key = 'muster'; Name = 'Muster GmbH'; Url = 'https://olaf.muster.de/' })
     $t = Merge-ServicesJson -Tree $t -Service $svcA -Installation ([pscustomobject]@{ Key = 'beispiel'; Name = 'Beispiel AG'; Url = 'https://olaf.beispiel.de/' })
@@ -756,7 +777,28 @@ Test-Case 'Expand-TemplateZip: Zwischenordner (auch doppelt) erkannt, Aufbau, Wi
     Assert-Equal 0 @(Test-TemplateStructure $st.Root).Count
     Assert-Equal $st.Dir (Expand-TemplateZip -Zip $zip).Dir 'gleiche Datei -> nicht erneut entpacken'
     $info = Get-TemplateInfo -Root $st.Root -PhpExe $PhpExe
+    Assert-Equal 'projekt' $info.ExampleService 'app.service der config.example.php'
+    Assert-Equal '' (Get-TemplateInfo -Root $st.Root -PhpExe $null).ExampleService 'ohne php: leer'
     Assert-Equal '8.5.0' $info.PhpMin; Assert-Equal 18 $info.PgMin; Assert ($info.Extensions -contains 'pdo_pgsql'); Assert ($info.Version -ne '')
+}
+
+Test-Case 'Get-ZipServiceWarnings: Vorlage-ZIP fuer werner, werner-ZIP fuer die Vorlage, passend, ohne Angaben' {
+    $w = $catalog.Services['werner']
+    $r = @(Get-ZipServiceWarnings -Service $w -ExampleService 'projekt' -Inner 'projektvorlage-main')
+    Assert-Equal 1 $r.Count 'eine Warnung, nicht zwei'
+    Assert ($r[0] -match "'projekt'" -and $r[0] -match "'werner'") $r[0]
+    Assert-Equal 0 @(Get-ZipServiceWarnings -Service $w -ExampleService 'werner' -Inner 'werner-main').Count 'passt'
+    $r = @(Get-ZipServiceWarnings -Service $svc -ExampleService 'werner' -Inner 'werner-main')
+    Assert ($r[0] -match "'werner'") 'werner-ZIP bei der Vorlage'
+    # app.service unbekannt (aelterer Stand / ohne php): Projektstamm gegen die ZIP des Katalogs
+    $r = @(Get-ZipServiceWarnings -Service $w -Inner 'projektvorlage-main')
+    Assert ($r[0] -match 'projektvorlage-main' -and $r[0] -match 'werner-main\.zip') $r[0]
+    Assert-Equal 0 @(Get-ZipServiceWarnings -Service $w -Inner 'x\WERNER-MAIN').Count 'verschachtelt, Gross/Klein egal'
+    Assert-Equal 0 @(Get-ZipServiceWarnings -Service $catalog.Services['olaf'] -Inner 'olaf-main').Count 'Katalog ohne zip: kein Vergleich'
+    Assert-Equal 0 @(Get-ZipServiceWarnings -Service $w).Count 'ohne Angaben'
+    foreach ($t in @(Get-ZipServiceWarnings -Service $w -ExampleService 'projekt') + @(Get-ZipServiceWarnings -Service $w -Inner 'a')) {
+        Assert ($t -cmatch '^[\x20-\x7E]+$') "nur ASCII: $t"
+    }
 }
 
 # =============================================================================

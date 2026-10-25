@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.3“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.3“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -76,7 +76,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 | 3.8 | `C:\AK\services.json` | Dienst `projekt` mit `muster` und `beispiel` in dieser Reihenfolge; eigene Ports in den URLs |
 | 3.9 | Beide Anwendungen in zwei Tabs anmelden | Anmeldung gilt nicht über Kreuz; App-Switcher zeigt rechts beide Mandanten |
 | 3.10 | Katalog „Renate“ → Mandant „muster - Muster GmbH (in projekt)“ wählen | Schlüssel `muster` fest, Name „Muster GmbH“ übernommen, Port 21102, Kasten `renate` / Datenbank `renate` |
-| 3.11 | „Weiter“ → ZIP `C:\SNAIL\projektvorlage-main.zip` per „…“ wählen → „Erneut prüfen“ → „Installieren“ | ✓ Mandant „'muster' gibt es schon in projekt …“, ✓ Logo „png … -> logos/renate.png“; alle Schritte ✓ |
+| 3.11 | „Weiter“ → ZIP `C:\SNAIL\projektvorlage-main.zip` per „…“ wählen → „Erneut prüfen“ → „Installieren“ | ✓ Mandant „'muster' gibt es schon in projekt …“, ✓ Logo „png … -> logos/renate.png“, ⚠ ZIP-Datei „Die ZIP ist fuer den Dienst 'projekt' gebaut … gewaehlt ist 'renate' …“ (hier gewollt); alle Schritte ✓ |
 | 3.12 | `C:\AK\logos\renate.png` und `C:\AK\services.json` ansehen; in A über den App-Switcher zu Renate wechseln | Logo-Datei da; Dienst `renate` mit `"logo": "logos/renate.png"` und Installation `muster`; beim Wechsel bleibt der Mandant „Muster GmbH“ ausgewählt, das Logo erscheint |
 
 ## 4 Einrichtung wiederholen
@@ -121,6 +121,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 | 7.2 | Erneut X → „Ja“ | laufender Schritt wird fertig, Protokoll „Abbruch angefordert …“, „Abgebrochen auf Wunsch … - beim nächsten Lauf geht es dort weiter“, „=== … abgebrochen ===“ – beide Zeilen als Warnung, nicht Fehler, Fenster schließt; `config.php` gibt es noch nicht |
 | 7.3 | SNAIL starten | „projekt-abbruch“ steht **nicht** oben (keine `config.php`); Katalog → Mandant `abbruch` → Kasten `projekt-abbruch`; Prüfen: ✓ Datenbank „(vorhanden) / Rolle (vorhanden) - Fortsetzen nach Abbruch (laut Zugangsdatei dieses Ordners), Passwort der Rolle wird neu gesetzt“ – **kein** Kasten „Vorhandene Datenbank“, kein Häkchen nötig; Port-Vorschlag = Port der schon angelegten Website `projekt-abbruch` mit grünem „frei“; Website „gibt es schon … wird angeglichen, Bindings bleiben“; ✓ Port – **kein** „von Windows reserviert“ (HTTP.sys trägt den Port der laufenden Website in die excludedportrange ein) |
 | 7.4 | „Installieren“ (ohne die Website vorher anzuhalten) | alle Schritte ✓, `check` grün |
+| 7.4a | – | nach jedem Fehler (z. B. 7.5) steht in der Statuszeile unten „Fehlgeschlagen - Grund siehe oben …“, **nicht** mehr „Läuft …“ |
 | 7.5 | Fehler nach der `config.php`: ZIP nach `C:\AK\projekt-fehler` entpacken (Inhalt von `projektvorlage-main` direkt), `database\migrations\9999_kaputt.sql` mit `SELECT kaputt(;` anlegen; Neuinstallation Mandant `fehler` mit „Vorhandenen Programmordner nutzen“ | config.php ✓, `migrate` ✗ rot, Fehlertext nennt die Ursache („… [FEHLER] Migration 9999_kaputt.sql fehlgeschlagen …“, nicht „^“), „Erneut versuchen“ aktiv |
 | 7.6 | `9999_kaputt.sql` löschen → „Erneut versuchen“ | Protokoll „Datenbank projekt_fehler, Rolle projekt_fehler_user, Passwort aus der vorhandenen config.php.“; alle Schritte ✓, die Schrittliste links zeigt dabei **alle** Schritte mit Status |
 | 7.7 | Datenordner auf `X:\AK\projekt-x` ändern → „Weiter“ | Prüfen: ✗ Datenordner „… Laufwerk von X:\AK\projekt-x\… fehlt oder ist kein Festplattenlaufwerk.“ (kein Absturz) |
@@ -201,6 +202,16 @@ Für einen Computer-Use-Lauf auf **SRV-Test** gedacht: jeden Schritt der Reihe n
 | 11.21 | Den richtigen Schlüssel aus `zugangsdaten\projekt-alt.txt` wieder eintragen; `& $php C:\AK\projekt-alt\bin\console check` | `[OK     ] Schlüssel für Geheimnisse (app.key)` |
 | 11.22 | In `C:\AK\projekt-schluessel\config.php` die Zeile `'key' => '…',` durch **zwei** Zeilen `'key' => '',` ersetzen, Hash notieren → „Schlüssel-Test“ ohne ZIP → „Installieren“ | Schritt ⚠; Hinweis „config.php nicht geändert: app.key steht mehrfach in der config.php …“; „Fertig“: „app.key : NICHT eingetragen …“ mit einem Vorschlag (44 Zeichen) und den Zeilen „Gilt erst, wenn er in der config.php … steht. NUR eintragen, wenn app.key dort wirklich fehlt oder leer ist …“; Hash **unverändert**; keine `config.php.vor-snail-*` in `D:\AK\projekt-schluessel\Sicherung` |
 | 11.23 | Aufräumen: in `projekt-schluessel\config.php` wieder **eine** Zeile mit dem Schlüssel aus `zugangsdaten\projekt-schluessel.txt`; `Remove-Item C:\vorher.json` | `check` von `projekt-schluessel`: app.key OK; `C:\vorher.json` weg (enthielt das DB-Passwort) |
+
+## 12 Katalog-Eintrag werner
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 12.1 | `werner-main.zip` (GitHub „Download ZIP“ von werner) nach `C:\SNAIL`; SNAIL starten | Katalog: Zeile „werner | werner | DMS“ mit Archiv-Symbol |
+| 12.2 | „werner“ → Mandant `muster` → „Weiter“ → ZIP `C:\SNAIL\projektvorlage-main.zip` wählen → „Erneut prüfen“ | ⚠ ZIP-Datei „Die ZIP ist fuer den Dienst 'projekt' gebaut (app.service in der config.example.php), gewaehlt ist 'werner' (werner) - passt die ZIP zum Katalog-Eintrag?“ |
+| 12.3 | ZIP `C:\SNAIL\werner-main.zip` (Vorschlag des Katalogs) → „Erneut prüfen“ | ✓ ZIP-Datei „… (Projektstamm 'werner-main' erkannt)“, **keine** ZIP-Warnung (vorausgesetzt, werner hat `'service' => 'werner'` in der `config.example.php`) |
+| 12.4 | „Installieren“; danach `Get-Content C:\AK\services.json` | alle Schritte ✓; Dienst `werner` mit `"name": "werner"`, `"description": "DMS"`, `"icon": "archive"`, `"tone": "primary"` |
+| 12.5 | Auswahl „werner - Muster GmbH“ → ZIP `projektvorlage-main.zip` (Aktualisieren) → „Erneut prüfen“ | ⚠ ZIP-Datei wie in 12.2 – hier **nicht** aktualisieren, „Zur Auswahl“ |
 
 ## Ergebnis festhalten
 

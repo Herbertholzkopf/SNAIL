@@ -26,6 +26,19 @@
       "braucht": []
     },
     {
+      "_doku": "werner: das DMS, gebaut aus der projektvorlage (GitHub-ZIP werner-main.zip mit Projektstamm werner-main). In der services.json steht es als werner mit der Beschreibung DMS.",
+      "key": "werner",
+      "name": "werner",
+      "icon": "archive",
+      "tone": "primary",
+      "logo": "",
+      "description": "DMS",
+      "zip": "werner-main.zip",
+      "uploadsMaxMb": 250,
+      "phpModule": [],
+      "braucht": []
+    },
+    {
       "_doku": "Die folgenden Dienste stammen aus der Projektliste von SNAIL 5 (Logos als Dateien unter logos/). Installierbar sind sie, sobald das Programm auf die projektvorlage umgestellt ist und eine ZIP gewaehlt wird.",
       "key": "gertrud",
       "name": "Gertrud",

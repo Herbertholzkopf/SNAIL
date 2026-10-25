@@ -1266,6 +1266,7 @@ function Update-InstalledConfigKeys {
         $res.Changed = @()
         $res.Status = if ($res.Key) { 'manual' } else { 'failed' }
         $res.Text = 'config.php nicht geändert: ' + $_.Exception.Message
+        if ($res.Text -notmatch '[.!?]$') { $res.Text += '.' }
     }
     return $res
 }
@@ -1273,7 +1274,18 @@ function Update-InstalledConfigKeys {
 # requirements und version aus config/app.php der Vorlage (ZIP oder Ordner)
 function Get-TemplateInfo {
     param([Parameter(Mandatory)][string]$Root, [string]$PhpExe)
-    $info = [pscustomobject]@{ Version = ''; PhpMin = '8.5.0'; PgMin = 18; Extensions = @('pdo_pgsql', 'mbstring', 'openssl', 'json', 'ctype', 'fileinfo', 'session') }
+    $info = [pscustomobject]@{ Version = ''; PhpMin = '8.5.0'; PgMin = 18; Extensions = @('pdo_pgsql', 'mbstring', 'openssl', 'json', 'ctype', 'fileinfo', 'session'); ExampleService = '' }
+    # app.service der config.example.php: fuer welchen Dienst ist der Programmcode gebaut?
+    # (die Vorlage selbst: 'projekt'; nur Literale, deshalb gefahrlos per php -r)
+    $example = Join-Path $Root 'config.example.php'
+    if ($PhpExe -and (Test-Path -LiteralPath $example)) {
+        try {
+            $code = '$c = require $argv[1]; echo json_encode(["service" => (is_array($c) ? ($c["app"]["service"] ?? "") : "")]);'
+            $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', $code, $example)) -Utf8Output -TimeoutSec 60
+            $pos = $r.Output.IndexOf('{')
+            if ($r.ExitCode -eq 0 -and $pos -ge 0) { $info.ExampleService = [string]($r.Output.Substring($pos) | ConvertFrom-Json).service }
+        } catch { }
+    }
     $file = Join-Path (Join-Path $Root 'config') 'app.php'
     if (-not $PhpExe -or -not (Test-Path -LiteralPath $file)) { return $info }
     $code = '$a = require $argv[1]; echo json_encode(["version" => $a["version"] ?? "", "requirements" => $a["requirements"] ?? null]);'
@@ -1291,6 +1303,26 @@ function Get-TemplateInfo {
         }
     } catch { }
     return $info
+}
+
+<#
+ Passt die ZIP zum gewaehlten Katalog-Eintrag? Nur Warnungen (z. B. werner
+ gewaehlt, aber die ZIP der projektvorlage angegeben - oder umgekehrt):
+   1. app.service in der config.example.php der ZIP gegen den Dienst
+   2. sonst der Projektstamm (GitHub: <repo>-<branch>) gegen den Namen der
+      vorgeschlagenen ZIP im Katalog (zip = werner-main.zip -> werner-main)
+#>
+function Get-ZipServiceWarnings {
+    param([Parameter(Mandatory)]$Service, [string]$ExampleService = '', [string]$Inner = '')
+    if ($ExampleService -and $ExampleService -cne $Service.Key) {
+        return @("Die ZIP ist fuer den Dienst '$ExampleService' gebaut (app.service in der config.example.php), gewaehlt ist '$($Service.Key)' ($($Service.Name)) - passt die ZIP zum Katalog-Eintrag?")
+    }
+    $leaf = if ($Inner) { @($Inner -split '[\\/]')[-1] } else { '' }
+    $expect = if ($Service.Zip) { [System.IO.Path]::GetFileNameWithoutExtension([string]$Service.Zip) } else { '' }
+    if ($leaf -and $expect -and $leaf -ine $expect) {
+        return @("Projektstamm '$leaf' passt nicht zur ZIP des Katalog-Eintrags '$($Service.Name)' ($expect.zip) - richtige ZIP gewaehlt?")
+    }
+    return @()
 }
 
 # ==============================================================================
@@ -3100,6 +3132,9 @@ function Test-Installation {
             if (-not (Test-Path -LiteralPath (Join-Path $srcRoot $f))) { & $add 'Warn' 'Vorlage' "$f fehlt - dieser Schritt wird übersprungen." }
         }
         $plan.Template = Get-TemplateInfo -Root $srcRoot -PhpExe $php
+        if ($plan.Source) {
+            foreach ($w in @(Get-ZipServiceWarnings -Service $inst.Service -ExampleService $plan.Template.ExampleService -Inner $plan.Source.Inner)) { & $add 'Warn' 'ZIP-Datei' $w }
+        }
     } else {
         $plan.Template = Get-TemplateInfo -Root $plan.ProgDir -PhpExe $null
     }
@@ -4472,6 +4507,7 @@ function Start-Install {
     if ($ok) { Show-Page 'finish' }
     else {
         $script:LblInstallError.Text = $script:Result.Error
+        Set-Status 'Fehlgeschlagen - Grund siehe oben und im Protokoll; "Erneut versuchen" macht beim fehlgeschlagenen Schritt weiter.'
         Update-NextState
     }
 }
