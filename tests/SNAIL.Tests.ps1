@@ -7,6 +7,9 @@
    - Kommandozeilen-Maskierung (Rundreise ueber php)
    - config.php aus der echten config.example.php: Escaping, ohne BOM,
      php -l, Ladeversuch, keine fehlenden Schluessel, optional python.exe
+   - app.key (7.3): Format gegen SecretBox::parseKey, Neuinstallation,
+     Ergaenzen in einer vorhandenen config.php (Text und Datei, Sicherung,
+     zweiter Lauf, vorhanden/leer/ungueltig, Fallback, keine Werte in Ausgaben)
    - Katalog (projekte.json im Repository, Vorlage, Fehlerfaelle)
    - Eingaben einer Neuinstallation, Ordnernamen, Datenpfade, Ports
    - Installationen am Server erkennen (php bin\console info, auch mit
@@ -20,7 +23,7 @@
      migrate -> user:create -> services.json -> check -> Erkennung am Server
 
  Aufruf:
-   pwsh tests/SNAIL.Tests.ps1 -Vorlage ../projektvorlage -PgPassword '<Passwort postgres>' -PgBin /usr/lib/postgresql/16/bin
+   pwsh tests/SNAIL.Tests.ps1 -Vorlage ../projektvorlage -PgPassword '<Passwort postgres>' -PgBin /usr/lib/postgresql/18/bin
  Ohne -PgPassword (bzw. $env:SNAIL_PG_PASSWORD) entfallen die PostgreSQL-Tests.
 #>
 param(
@@ -43,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -401,6 +404,236 @@ echo json_encode(['fehlt' => array_values(array_diff($e, $c)), 'zuviel' => array
 }
 
 # =============================================================================
+Write-Host "`n== app.key (7.3): erzeugen, nachtragen, nie ueberschreiben"
+# config.example.php vor CONFIG_VERSION 4 (Stand v0.37): ohne app.key, app.key_previous, mail.redirect_to
+$exampleV3 = (($example -split "`n") | Where-Object { $_ -notmatch "^\s*'(key|key_previous|redirect_to)' =>" }) -join "`n"
+$exampleV3 = $exampleV3 -replace "'CONFIG_VERSION' => 4,", "'CONFIG_VERSION' => 3,"
+function Test-SecretBoxKey([string]$Key) {
+    $code = 'require $argv[1]; require $argv[2]; echo App\Support\SecretBox::parseKey(trim(fgets(STDIN))) === null ? "nein" : "ja";'
+    $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', $code, (Join-Path $Vorlage 'src/Support/SecretBoxException.php'), (Join-Path $Vorlage 'src/Support/SecretBox.php'))) -StdIn ($Key + "`n") -Utf8Output -TimeoutSec 60
+    return ($r.Output.Trim() -eq 'ja')
+}
+function New-OldInstall([string]$Name, [string]$ExampleNow = $example, [string]$ExampleThen = $exampleV3) {
+    $prog = Join-Path $tmp "appkey/$Name"
+    New-Item -ItemType Directory -Path $prog -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $prog 'config.example.php'), $ExampleThen)
+    $in = (New-InstanceInput -Service $svc -Values (New-TestValues @{ MailHost = 'smtp.muster.de'; MailPass = "p'w\x"; MailEnabled = $true })).Inst
+    $plan = New-TestPlan $prog (Join-Path $tmp "appkeydaten/$Name") $in
+    $plan.DbName = 'projekt'; $plan.DbUser = 'projekt_user'; $plan.Mode = 'update'; $plan.Kind = 'installed'
+    Write-ProjectConfig -Plan $plan -DbPassword 'GEHEIM-db-123' | Out-Null
+    # Update: neuer Programmcode bringt die neue config.example.php
+    [System.IO.File]::WriteAllText((Join-Path $prog 'config.example.php'), $ExampleNow)
+    return $plan
+}
+function Get-ConfigJson($Plan) { Invoke-Php 'echo json_encode(require $argv[1], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);' @((Join-Path $Plan.ProgDir 'config.php')) | ConvertFrom-Json }
+function Get-Backups($Plan) { @(Get-ChildItem -LiteralPath (Get-BackupRoot -Plan $Plan) -Filter 'config.php.vor-snail-*' -ErrorAction SilentlyContinue) }
+
+Test-Case 'New-AppKey / Test-AppKey: 44 Zeichen Base64 von 32 Byte, SecretBox::parseKey der Vorlage nimmt ihn' {
+    $a = New-AppKey; $b = New-AppKey
+    Assert-Equal 44 $a.Length; Assert ($a -ne $b) 'zufaellig'
+    Assert-Equal 32 ([Convert]::FromBase64String($a)).Length
+    Assert (Test-AppKey $a) 'gueltig'
+    Assert (Test-SecretBoxKey $a) 'SecretBox::parseKey'
+    foreach ($bad in @('', '   ', 'abc', ($a.Substring(0, 43) + 'x'), ([Convert]::ToBase64String((New-Object byte[] 31))), ([Convert]::ToBase64String((New-Object byte[] 33))), ($a.Substring(0, 40) + '!!!='))) {
+        Assert (-not (Test-AppKey $bad)) "ungueltig: '$bad'"
+    }
+    Assert (Test-AppKey (" $a ")) 'Leerzeichen am Rand wie SecretBox (trim)'
+}
+Test-Case 'Neuinstallation: Write-ProjectConfig setzt app.key; app.key_previous und mail.redirect_to leer; Vorlage ohne app.key weiter installierbar' {
+    $prog = Join-Path $tmp 'appkey/neu'
+    New-Item -ItemType Directory -Path $prog -Force | Out-Null
+    Copy-Item (Join-Path $Vorlage 'config.example.php') $prog
+    $in = (New-InstanceInput -Service $svc -Values (New-TestValues)).Inst
+    $plan = New-TestPlan $prog (Join-Path $tmp 'appkeydaten/neu') $in
+    $plan.DbName = 'projekt'; $plan.DbUser = 'projekt_user'
+    $key = New-AppKey
+    Write-ProjectConfig -Plan $plan -DbPassword 'x' -AppKey $key | Out-Null
+    $cfg = Get-ConfigJson $plan
+    Assert-Equal $key $cfg.app.key; Assert-Equal '' $cfg.app.key_previous; Assert-Equal '' $cfg.mail.redirect_to
+    Assert-Equal 'present' (Update-InstalledConfigKeys -Plan $plan).Status 'danach: vorhanden, nichts zu tun'
+    $prog2 = Join-Path $tmp 'appkey/neu-alt'
+    New-Item -ItemType Directory -Path $prog2 -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $prog2 'config.example.php'), $exampleV3)
+    $plan.ProgDir = $prog2
+    Write-ProjectConfig -Plan $plan -DbPassword 'x' -AppKey $key | Out-Null
+    Assert ($null -eq (Get-ConfigJson $plan).app.key) 'Vorlage ohne app.key: nicht gesetzt'
+    Assert-Equal 'none' (Update-InstalledConfigKeys -Plan $plan).Status 'Vorlage ohne app.key: nichts zu ergaenzen'
+}
+
+Write-Host "  -- Add-ConfigKeys (Text)"
+$v4 = [ordered]@{ 'app.key' = 'K' * 43 + '='; 'app.key_previous' = ''; 'mail.redirect_to' = '' }
+Test-Case 'Add-ConfigKeys: Schluessel fehlen -> vor dem ] des Bereichs eingefuegt, Einrueckung, Kommentare und alle Zeilen bleiben' {
+    $r = Add-ConfigKeys -Text $exampleV3 -Values $v4
+    Assert-Equal '' $r.Error
+    Assert-Equal 'app.key,app.key_previous,mail.redirect_to' ($r.Changed -join ',')
+    $old = $exampleV3 -split "`n"; $new = $r.Text -split "`n"
+    Assert-Equal ($old.Count + 5) $new.Count 'je Bereich Kommentar + Schluessel'
+    $j = 0
+    foreach ($l in $new) { if ($j -lt $old.Count -and $l -ceq $old[$j]) { $j++ } }
+    Assert-Equal $old.Count $j 'alle alten Zeilen unveraendert und in Reihenfolge'
+    Assert ($r.Text -match "(?m)^        'key' => 'K{43}=',$") 'app.key mit Einrueckung der Nachbarn'
+    Assert ($r.Text -match "(?m)^        'redirect_to' => '',\r?\n    \],") 'mail.redirect_to am Ende von mail'
+    Assert ($r.Text -match "(?s)'app' => \[.*'key' => 'K.*?\],\s*//.*?'db' => \[") 'app.key im Bereich app'
+}
+Test-Case "Add-ConfigKeys: 'key' => '' vorhanden -> Literal ersetzt, Kommentar dahinter bleibt, Zeilenzahl gleich" {
+    $t = $example -replace "'key' => '',", "'key' => '',   // Schluessel"
+    $r = Add-ConfigKeys -Text $t -Values ([ordered]@{ 'app.key' = 'K' * 43 + '=' })
+    Assert-Equal '' $r.Error
+    Assert-Equal (($t -split "`n").Count) (($r.Text -split "`n").Count)
+    Assert ($r.Text -match "'key' => 'K{43}=',   // Schluessel") $r.Text
+    Assert ($r.Text -match "'key_previous' => ''") 'key_previous unberuehrt'
+}
+Test-Case 'Add-ConfigKeys: vorhandener Wert wird nie ersetzt; doppelt, inline, doppelte Anfuehrungszeichen, fehlender Bereich -> Fehler, Text gleich' {
+    $t = $example -replace "'key' => '',", "'key' => 'abc',"
+    $r = Add-ConfigKeys -Text $t -Values ([ordered]@{ 'app.key' = 'NEU' })
+    Assert ($r.Error -match 'schon einen Wert') $r.Error; Assert ($r.Text -ceq $t) 'unveraendert'; Assert ($r.Error -notmatch 'abc|NEU') 'kein Wert in der Meldung'
+    $faelle = @{
+        doppelt = ($exampleV3 -replace "'name' => 'Projekt',", "'name' => 'Projekt',`n        'key' => '',`n        'key' => '',")
+        inline  = "<?php`nreturn [`n    'CONFIG_VERSION' => 3,`n    'app' => ['name' => 'x', 'url' => 'y'],`n];`n"
+        dquote  = ($exampleV3 -replace "'name' => 'Projekt',", "'name' => 'Projekt',`n        ""key"" => """",")
+        zweimal = ($exampleV3 -replace "(?m)^\];", "    'app' => [`n        'x' => 1,`n    ],`n];")
+        ohne    = "<?php`nreturn [`n    'db' => [`n        'host' => 'x',`n    ],`n];`n"
+    }
+    foreach ($n in $faelle.Keys) {
+        $r = Add-ConfigKeys -Text $faelle[$n] -Values ([ordered]@{ 'app.key' = 'NEU' })
+        Assert ($r.Error -ne '') "$n`: Fehler erwartet"
+        Assert ($r.Text -ceq $faelle[$n]) "$n`: Text unveraendert"
+        Assert-Equal 0 @($r.Changed).Count "$n`: nichts geaendert"
+    }
+}
+Test-Case 'Add-ConfigKeys: letzte Zeile ohne Komma, verschachtelter Bereich mit eigenem key, CRLF, leerer Bereich' {
+    $t = "<?php`r`nreturn [`r`n    'CONFIG_VERSION' => 3,`r`n    'app' => [`r`n        'name' => 'x',`r`n        'sub' => [`r`n            'key' => '',`r`n        ]`r`n    ],`r`n    'mail' => [`r`n        'host' => 'h' // ohne Komma`r`n    ],`r`n    'leer' => [`r`n    ],`r`n];`r`n"
+    $r = Add-ConfigKeys -Text $t -Values ([ordered]@{ 'app.key' = 'A'; 'mail.redirect_to' = ''; 'leer.x' = 1 })
+    Assert-Equal '' $r.Error
+    Assert (-not ($r.Text -match "(?<!\r)\n")) 'nur CRLF'
+    Assert ($r.Text.Contains("            'key' => '',`r`n        ],`r`n")) 'app.sub.key unberuehrt, Komma nach ] ergaenzt'
+    Assert ($r.Text.Contains("        'key' => 'A',`r`n    ],")) 'app.key eingefuegt'
+    Assert ($r.Text.Contains("'host' => 'h', // ohne Komma")) 'Komma vor dem Kommentar ergaenzt'
+    Assert ($r.Text.Contains("    'leer' => [`r`n        // von SNAIL")) 'leerer Bereich: Einrueckung + 4'
+    $lint = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', 'echo json_encode(eval(substr(stream_get_contents(STDIN), 5)));')) -StdIn $r.Text -Utf8Output
+    $j = $lint.Output | ConvertFrom-Json
+    Assert-Equal 'A' $j.app.key; Assert-Equal '' $j.app.sub.key; Assert-Equal '' $j.mail.redirect_to; Assert-Equal 1 $j.leer.x; Assert-Equal 'h' $j.mail.host
+}
+Test-Case 'Add-ConfigKeys: CONFIG_VERSION nur von erlaubtem Wert, oberste Ebene wird nie eingefuegt' {
+    $r = Add-ConfigKeys -Text $exampleV3 -Values ([ordered]@{ 'CONFIG_VERSION' = 4 }) -Allowed @{ 'CONFIG_VERSION' = @('3') }
+    Assert ($r.Text -match "'CONFIG_VERSION' => 4,") 'angehoben'
+    $r = Add-ConfigKeys -Text $example -Values ([ordered]@{ 'CONFIG_VERSION' = 4 }) -Allowed @{ 'CONFIG_VERSION' = @('3') }
+    Assert ($r.Error -ne '') 'Version 4 ist kein erlaubter alter Wert'
+    $r = Add-ConfigKeys -Text "<?php`nreturn [`n    'app' => [`n    ],`n];" -Values ([ordered]@{ 'CONFIG_VERSION' = 4 })
+    Assert ($r.Error -match 'oberster Ebene') $r.Error
+}
+
+Write-Host "  -- Update-InstalledConfigKeys (Datei, php)"
+Test-Case 'Update v0.37 -> v0.39: app.key nachgetragen, Sicherung, CONFIG_VERSION 4, alle anderen Werte gleich; zweiter Lauf aendert nichts' {
+    $plan = New-OldInstall 'update'
+    $file = Join-Path $plan.ProgDir 'config.php'
+    $before = Get-ConfigJson $plan
+    $bytes0 = [System.IO.File]::ReadAllBytes($file)
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'added' $r.Status $r.Text
+    Assert-Equal 'app.key,app.key_previous,mail.redirect_to,CONFIG_VERSION' ($r.Changed -join ',')
+    Assert (Test-SecretBoxKey $r.Key) 'gueltiger Schluessel'
+    Assert ($r.Text -notmatch [regex]::Escape($r.Key)) 'Schluessel nicht in der Meldung'
+    Assert (-not (Test-Path "$file.neu")) '.neu aufgeraeumt'
+    $after = Get-ConfigJson $plan
+    Assert-Equal $r.Key $after.app.key; Assert-Equal '' $after.app.key_previous; Assert-Equal '' $after.mail.redirect_to; Assert-Equal 4 $after.CONFIG_VERSION
+    foreach ($o in @($before, $after)) { $o.app.PSObject.Properties.Remove('key'); $o.app.PSObject.Properties.Remove('key_previous'); $o.mail.PSObject.Properties.Remove('redirect_to'); $o.PSObject.Properties.Remove('CONFIG_VERSION') }
+    Assert-Equal ($before | ConvertTo-Json -Depth 5 -Compress) ($after | ConvertTo-Json -Depth 5 -Compress) 'alle anderen Werte gleich'
+    $bk = Get-Backups $plan
+    Assert-Equal 1 $bk.Count 'Sicherung'
+    Assert ($bk[0].DirectoryName -eq (Get-BackupRoot -Plan $plan)) 'in <Datenordner>\Sicherung'
+    Assert-Equal ([Convert]::ToBase64String($bytes0)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bk[0].FullName))) 'Sicherung = vorheriger Stand'
+    Assert-Equal $bk[0].FullName $r.Backup
+    # check der Vorlage: keine fehlenden Schluessel, keine Versionswarnung
+    $cmp = Invoke-Php 'require $argv[1]; [$c] = App\Support\Config::tryLoad($argv[2]); echo json_encode(App\Support\Config::comparisonMessages($c, $argv[3]));' @((Join-Path $Vorlage 'src/Support/Config.php'), $file, (Join-Path $plan.ProgDir 'config.example.php'))
+    Assert-Equal '[]' $cmp.Trim() "Abgleich mit der Vorlage: $cmp"
+    # zweiter Lauf
+    $bytes1 = [System.IO.File]::ReadAllBytes($file)
+    $r2 = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'present' $r2.Status; Assert-Equal '' $r2.Key; Assert-Equal 0 @($r2.Changed).Count
+    Assert-Equal ([Convert]::ToBase64String($bytes1)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file))) 'zweiter Lauf: Bytes gleich'
+    Assert-Equal 1 (Get-Backups $plan).Count 'keine weitere Sicherung'
+}
+Test-Case 'Vorhandener gueltiger Schluessel bleibt; nur fehlende Nachbarn ergaenzt' {
+    $plan = New-OldInstall 'vorhanden'
+    $file = Join-Path $plan.ProgDir 'config.php'
+    $key = New-AppKey
+    $t = [System.IO.File]::ReadAllText($file) -replace "('installation' => '[^']*',)", "`$1`n        'key' => '$key',"
+    [System.IO.File]::WriteAllText($file, $t)
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'present' $r.Status $r.Text; Assert-Equal '' $r.Key
+    Assert-Equal 'app.key_previous,mail.redirect_to,CONFIG_VERSION' ($r.Changed -join ',')
+    Assert-Equal $key (Get-ConfigJson $plan).app.key 'Schluessel unveraendert'
+}
+Test-Case 'Leerer app.key in einer v4-config.php wird gefuellt; CONFIG_VERSION bleibt 4' {
+    $plan = New-OldInstall 'leer' $example $example
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'added' $r.Status $r.Text
+    Assert-Equal 'app.key' ($r.Changed -join ',')
+    $c = Get-ConfigJson $plan
+    Assert-Equal $r.Key $c.app.key; Assert-Equal 4 $c.CONFIG_VERSION
+}
+Test-Case 'Ungueltiger app.key: nichts geaendert, Warnung, keine Sicherung' {
+    $plan = New-OldInstall 'ungueltig' $example $example
+    $file = Join-Path $plan.ProgDir 'config.php'
+    $t = ([System.IO.File]::ReadAllText($file) -replace "'key' => '',", "'key' => 'kaputt',") -replace "(?m)^\s*'redirect_to' => '',\r?\n", ''
+    [System.IO.File]::WriteAllText($file, $t)
+    $bytes0 = [System.IO.File]::ReadAllBytes($file)
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'invalid' $r.Status; Assert-Equal '' $r.Key; Assert ($r.Text -match 'ändert nichts') $r.Text
+    Assert-Equal ([Convert]::ToBase64String($bytes0)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file))) 'unveraendert (auch redirect_to nicht ergaenzt)'
+    Assert-Equal 0 (Get-Backups $plan).Count
+}
+Test-Case 'Nicht automatisch moeglich (app in einer Zeile): Status manual mit Schluessel zum Selbsteintragen, Datei unveraendert' {
+    $plan = New-OldInstall 'manuell'
+    $file = Join-Path $plan.ProgDir 'config.php'
+    [System.IO.File]::WriteAllText($file, "<?php`nreturn [`n    'CONFIG_VERSION' => 3,`n    'app' => ['name' => 'x', 'service' => 'projekt'],`n    'db' => ['password' => 'GEHEIM'],`n];`n")
+    $bytes0 = [System.IO.File]::ReadAllBytes($file)
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'manual' $r.Status $r.Text
+    Assert (Test-AppKey $r.Key) 'Vorschlag gueltig'
+    Assert ($r.Text -notmatch 'GEHEIM') 'kein Wert in der Meldung'
+    Assert-Equal ([Convert]::ToBase64String($bytes0)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file))) 'unveraendert'
+    Assert (-not (Test-Path "$file.neu")); Assert-Equal 0 (Get-Backups $plan).Count
+}
+Test-Case 'config.php mit BOM bleibt mit BOM; CONFIG_VERSION bleibt 3, wenn noch andere Schluessel fehlen' {
+    $exV2 = $exampleV3 -replace "(?s)\s*// -+\s*// HTTP-Client.*?'http' => \[.*?\],", ''
+    Assert ($exV2 -notmatch "'http' =>") 'Testvorlage ohne http'
+    $plan = New-OldInstall 'bom' $example $exV2
+    $file = Join-Path $plan.ProgDir 'config.php'
+    [System.IO.File]::WriteAllBytes($file, [byte[]](@(0xEF, 0xBB, 0xBF) + [System.IO.File]::ReadAllBytes($file)))
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'added' $r.Status $r.Text
+    Assert-Equal 'app.key,app.key_previous,mail.redirect_to' ($r.Changed -join ',') 'ohne CONFIG_VERSION'
+    $b = [System.IO.File]::ReadAllBytes($file)
+    Assert ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF -and $b[3] -eq [byte][char]'<') 'BOM erhalten'
+    Assert-Equal 3 (Read-InstalledConfig -ProgDir $plan.ProgDir -PhpExe $PhpExe).CONFIG_VERSION
+}
+Test-Case 'PHP-Vergleich nennt nur Schluesselnamen, nie Werte (auch bei Abweichung)' {
+    $plan = New-OldInstall 'vergleich'
+    $file = Join-Path $plan.ProgDir 'config.php'
+    $neu = Join-Path $plan.ProgDir 'anders.php'
+    [System.IO.File]::WriteAllText($neu, ([System.IO.File]::ReadAllText($file) -replace 'GEHEIM-db-123', 'ANDERS-db-456'))
+    $want = '{"app.key":"' + ('W' * 43) + '="}'
+    $j = Invoke-PhpConfigHelper -PhpExe $PhpExe -Code $script:PhpConfigVerify -Arguments @($file, $neu, (Join-Path $plan.ProgDir 'config.example.php')) -StdIn $want
+    $txt = $j | ConvertTo-Json -Compress -Depth 5
+    Assert (-not $j.ok) 'abweichend'
+    Assert (@($j.differs) -contains 'db.password') $txt
+    Assert (@($j.wrong) -contains 'app.key') $txt
+    Assert ($txt -notmatch 'GEHEIM|ANDERS|WWWW') "keine Werte: $txt"
+    $s = Invoke-PhpConfigHelper -PhpExe $PhpExe -Code $script:PhpConfigState -Arguments @($file, (Join-Path $plan.ProgDir 'config.example.php'))
+    Assert (($s | ConvertTo-Json -Compress -Depth 5) -notmatch 'GEHEIM|smtp\.muster') 'Zustand ohne Werte'
+    Assert-Equal 'missing' $s.keys.'app.key'.state
+}
+Test-Case 'Zugangsdatei: app_key mit Hinweis' {
+    $plan = New-OldInstall 'zugang'
+    $k = New-AppKey
+    $f = Save-InstallCredentials -Plan $plan -Values @{ app_key = $k }
+    Assert-Equal $k (Read-KeyValueFile $f)['app_key']
+    Assert (([System.IO.File]::ReadAllText($f)) -match 'Passwortmanager ablegen - ohne ihn sind gespeicherte Passwoerter verloren') 'Hinweis'
+}
+
+# =============================================================================
 Write-Host "`n== Logos, WIPP-Dateien, check"
 Test-Case 'Get-LogoData: PNG-Datei, SVG, Base64, data-URL, zu gross, unbekannt' {
     $png = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + [byte[]](1..100)
@@ -523,7 +756,7 @@ Test-Case 'Expand-TemplateZip: Zwischenordner (auch doppelt) erkannt, Aufbau, Wi
     Assert-Equal 0 @(Test-TemplateStructure $st.Root).Count
     Assert-Equal $st.Dir (Expand-TemplateZip -Zip $zip).Dir 'gleiche Datei -> nicht erneut entpacken'
     $info = Get-TemplateInfo -Root $st.Root -PhpExe $PhpExe
-    Assert-Equal '8.3.0' $info.PhpMin; Assert-Equal 14 $info.PgMin; Assert ($info.Extensions -contains 'pdo_pgsql'); Assert ($info.Version -ne '')
+    Assert-Equal '8.5.0' $info.PhpMin; Assert-Equal 18 $info.PgMin; Assert ($info.Extensions -contains 'pdo_pgsql'); Assert ($info.Version -ne '')
 }
 
 # =============================================================================
@@ -681,7 +914,9 @@ if (-not $PgPassword) {
         New-ProjectDatabase -Pg $pg -Password $PgPassword -DbName $db -Role $role -DbPassword $dbPw
         New-DataFolders -Plan $plan
         foreach ($p in @($plan.DataDir, $plan.Paths.Temp)) { Assert (Test-Path $p) $p }
-        Write-ProjectConfig -Plan $plan -DbPassword $dbPw | Out-Null
+        $script:DurchlaufKey = New-AppKey
+        Write-ProjectConfig -Plan $plan -DbPassword $dbPw -AppKey $script:DurchlaufKey | Out-Null
+        Assert-Equal $script:DurchlaufKey (Read-InstalledConfig -ProgDir $prog -PhpExe $PhpExe).app.key 'app.key'
     }
     Test-Case 'migrate (zweimal), user:create (zweimal, Umlaute im Namen), Benutzerzahl' {
         $m = Invoke-ConsoleMigrate -Plan $plan
@@ -716,6 +951,11 @@ if (-not $PgPassword) {
         Assert $c.Ok ("Exit $($c.ExitCode): " + ($fehler -join ' | '))
         $sj = @($c.Items | Where-Object { $_.Label -match 'services\.json|App-Switcher|Dienste' -and $_.Status -ne 'OK' })
         Assert-Equal 0 $sj.Count (($sj | ForEach-Object { "$($_.Label): $($_.Hint)" }) -join ' | ')
+        $ak = @($c.Items | Where-Object { $_.Label -match 'app\.key' })
+        Assert-Equal 1 $ak.Count 'Zeile app.key in check'
+        Assert-Equal 'OK' $ak[0].Status "app.key: $($ak[0].Hint)"
+        $cfgw = @($c.Items | Where-Object { $_.Status -ne 'OK' -and $_.Hint -match 'fehlen|CONFIG_VERSION' })
+        Assert-Equal 0 $cfgw.Count (($cfgw | ForEach-Object { "$($_.Label): $($_.Hint)" }) -join ' | ')
         $x = @(Get-InstalledInstances -ProgRoot $root -PhpExe $PhpExe -Catalog $catalog.Services -Sites @([pscustomobject]@{ Name = 'projekt'; Bindings = 'http/*:21100:' }) -ServicesJson $plan.ServicesJson)
         Assert-Equal 1 $x.Count
         Assert-Equal $db $x[0].Db.Name 'db aus php bin\console info'

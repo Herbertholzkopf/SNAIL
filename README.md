@@ -2,7 +2,7 @@
 
 ## Simple New-project Automation &amp; Installation Launcher
 
-Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **projektvorlage** (PHP 8.3+, IIS, PostgreSQL, `config.php`) **installiert und aktualisiert**: Programmcode aus der GitHub-ZIP, Datenordner, IIS-App-Pool und Website, gehärtete Ordnerrechte, optional eine Firewallregel, PostgreSQL-Rolle und Datenbank, `config.php`, Migrationen, erster Administrator, Eintrag in der `services.json` (App-Switcher), Windows-Aufgabe – und zum Schluss die Selbstprüfung der Anwendung und das Prüfskript der Vorlage.
+Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **projektvorlage** (PHP 8.5+, IIS, PostgreSQL 18, `config.php`) **installiert und aktualisiert**: Programmcode aus der GitHub-ZIP, Datenordner, IIS-App-Pool und Website, gehärtete Ordnerrechte, optional eine Firewallregel, PostgreSQL-Rolle und Datenbank, `config.php` (mit dem Schlüssel `app.key`), Migrationen, erster Administrator, Eintrag in der `services.json` (App-Switcher), Windows-Aufgabe – und zum Schluss die Selbstprüfung der Anwendung und das Prüfskript der Vorlage.
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
@@ -23,7 +23,7 @@ Es gibt keine zusätzliche Zustandsdatei: Wird der Katalog ausgetauscht, erkennt
 2. **Angaben** (nur Neuinstallation) – siehe [Eingabeseite](#eingabeseite).
 3. **Prüfen** – bevor irgendetwas geändert wird: Administrator, IIS/appcmd, URL Rewrite, WebDAV (Warnung), Windows-Firewall aktiv (Warnung), PHP-Version und -Module nach `requirements` der Vorlage, Python (falls `braucht`), psql, PostgreSQL erreichbar und Superuser-Anmeldung, Programmcode nach Vorlage aufgebaut, Port frei, Datenpfade, Datenbank, `services.json`, Mandanten-Schlüssel, Logo. Eingaben: ZIP-Datei oder vorhandener Programmordner, beim Aktualisieren die Sicherung, Superuser-Passwort (mit „Verbindung testen“).
 4. **Installation** – Schrittliste mit Live-Status und Protokoll daneben. Jeder Schritt ist wiederholbar; „Erneut versuchen“ macht dort weiter, wo es geklemmt hat.
-5. **Fertig** – Zugangsdaten zum Kopieren, Sicherung (Ort, Größe), Hinweise von `php bin\console check`, Ergebnis von `tools\windows-pruefung.ps1`; Schaltflächen: Anwendung öffnen, lokal öffnen, `config.php` öffnen, Prüfbericht, Zugangsdaten-Datei, zurück zur Auswahl.
+5. **Fertig** – Zugangsdaten zum Kopieren (auch `app.key`, wenn SNAIL ihn erzeugt oder nachgetragen hat), Sicherung (Ort, Größe), Hinweise von `php bin\console check`, Ergebnis von `tools\windows-pruefung.ps1`; Schaltflächen: Anwendung öffnen, lokal öffnen, `config.php` öffnen, Prüfbericht, Zugangsdaten-Datei, zurück zur Auswahl.
 
 | Auswahl | Programmcode | Modus |
 |---|---|---|
@@ -60,7 +60,8 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | Rechte | Programmordner, Datenordner, `C:\AK` (siehe [Rechte](#rechte)) | angleichen |
 | Firewall | nur auf Wunsch: Regel `SNAIL <Ordner> (TCP <port>)` | – |
 | PostgreSQL | Rolle und Datenbank (siehe [PostgreSQL](#postgresql)) | – |
-| `config.php` | aus `config.example.php`; eine vorhandene wird **nie** überschrieben | – (bleibt) |
+| `config.php` | aus `config.example.php` mit neu erzeugtem `app.key`; eine vorhandene wird **nie** überschrieben | – (bleibt) |
+| `app.key` nachtragen | Wiederholen: nur wenn `app.key` fehlt oder leer ist (siehe [app.key](#appkey)) | ebenso, nach dem neuen Programmcode |
 | `migrate` | `php bin\console migrate` | ebenso |
 | Administrator | `php bin\console user:create <login> "<Name>" admin [email]`, Initialpasswort wird angezeigt und abgelegt. Beim Wiederholen nur, wenn es noch **kein** Benutzerkonto gibt | – |
 | `services.json` | Dienst und Installation ergänzen/angleichen, Logo nach `C:\AK\logos\` | ebenso |
@@ -68,7 +69,7 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | `check` | `php bin\console check` – Exit 0 = startklar (Warnungen auf „Fertig“), Exit 1 = Einrichtung fehlgeschlagen | ebenso; neue Konfigurationsschlüssel meldet `check` als Hinweis |
 | Prüfskript | `tools\windows-pruefung.ps1 -Url http://localhost:<port>` unter **Windows PowerShell 5.1**, Bericht nach `C:\ProgramData\SNAIL\pruefberichte\` | ebenso |
 
-`services.json`, Windows-Aufgabe und Prüfskript halten die Installation nicht an: Scheitern sie, steht der Grund rot auf „Fertig“. Alle anderen Schritte bauen aufeinander auf und brechen bei einem Fehler ab. **Neue Konfigurationsschlüssel** nach einem Update ergänzt SNAIL nicht selbst – die Anwendung läuft mit Standardwerten weiter (Vorlage, `docs/04`), `check` nennt sie, „Fertig“ bietet „config.php öffnen“.
+`app.key` nachtragen, `services.json`, Windows-Aufgabe und Prüfskript halten die Installation nicht an: Scheitern sie, steht der Grund auf „Fertig“. Alle anderen Schritte bauen aufeinander auf und brechen bei einem Fehler ab. **Neue Konfigurationsschlüssel** nach einem Update ergänzt SNAIL nicht selbst (Ausnahme: `app.key`, `app.key_previous`, `mail.redirect_to`, siehe [app.key](#appkey)) – die Anwendung läuft mit Standardwerten weiter (Vorlage, `docs/04`), `check` nennt sie, „Fertig“ bietet „config.php öffnen“.
 
 ## Namen und Ordner
 
@@ -143,11 +144,24 @@ Eine `projekte.json` im alten Format (Projektliste mit MySQL) lehnt SNAIL mit ei
 
 ## config.php
 
-SNAIL schreibt die `config.php` aus der `config.example.php` der Vorlage per **Textersetzung**: Zeile für Zeile wird der Bereich (`'db' => [`) verfolgt und nur das Literal hinter `'schlüssel' =>` ersetzt – Kommentare, Reihenfolge und `CONFIG_VERSION` bleiben wie in der Vorlage. In `'…'` werden nur `\` und `'` maskiert (Vertrag: nur Literale). Fehlt ein Pflichtschlüssel, bricht der Schritt mit Namen ab; optionale Schlüssel (`python.exe`) werden nur gesetzt, wenn die Vorlage sie hat.
+SNAIL schreibt die `config.php` aus der `config.example.php` der Vorlage per **Textersetzung**: Zeile für Zeile wird der Bereich (`'db' => [`) verfolgt und nur das Literal hinter `'schlüssel' =>` ersetzt – Kommentare, Reihenfolge und `CONFIG_VERSION` bleiben wie in der Vorlage. In `'…'` werden nur `\` und `'` maskiert (Vertrag: nur Literale). Fehlt ein Pflichtschlüssel, bricht der Schritt mit Namen ab; optionale Schlüssel (`python.exe`, `app.key`) werden nur gesetzt, wenn die Vorlage sie hat.
 
-Gesetzt werden `app.name`, `app.url`, `app.timezone`, `app.service`, `app.installation`, `db.host/port/name/user/password`, `paths.data/cache/logs/temp/services_json` (absolut), `uploads.max_mb`, `mail.from_name` und – falls angegeben – `cloudflare.*`, `mail.*`, `python.exe`. `session.name` bleibt leer (die Anwendung bildet `<service>_<installation>_session`).
+Gesetzt werden `app.name`, `app.url`, `app.timezone`, `app.service`, `app.installation`, `db.host/port/name/user/password`, `paths.data/cache/logs/temp/services_json` (absolut), `uploads.max_mb`, `mail.from_name`, `app.key` (neu erzeugt) und – falls angegeben – `cloudflare.*`, `mail.*`, `python.exe`. `session.name` bleibt leer (die Anwendung bildet `<service>_<installation>_session`).
 
-Geschrieben wird **UTF-8 ohne BOM** (`[IO.File]::WriteAllText` mit `UTF8Encoding($false)`) zuerst nach `config.php.neu`, dann `php -l`, dann umbenannt. Eine vorhandene `config.php` wird nie überschrieben und nur über PHP gelesen (`php bin\console info`; das DB-Passwort nur wenn nötig per `php -r`), nie per Regex.
+Geschrieben wird **UTF-8 ohne BOM** (`[IO.File]::WriteAllText` mit `UTF8Encoding($false)`) zuerst nach `config.php.neu`, dann `php -l`, dann umbenannt. Eine vorhandene `config.php` wird nie überschrieben und nur über PHP gelesen (`php bin\console info`; das DB-Passwort nur wenn nötig per `php -r`), nie per Regex. Einzige Ausnahme ist das Nachtragen eines fehlenden `app.key` (unten).
+
+### app.key
+
+Schlüssel für Geheimnisse in der Datenbank (z. B. SMTP-Passwörter der Mailkonten, `SecretBox` der Vorlage, seit `CONFIG_VERSION` 4): Base64 (Standard-Alphabet mit `=`) von genau 32 Zufallsbytes, 44 Zeichen. **Ohne ihn sind gespeicherte Passwörter verloren** – mit der `config.php` sichern und im Passwortmanager ablegen.
+
+- **Neuinstallation:** SNAIL erzeugt ihn in PowerShell (32 Bytes aus `RandomNumberGenerator`, `[Convert]::ToBase64String`) und schreibt ihn wie das DB-Passwort in die `config.php`, dazu als `app_key` in die Zugangsdatei; „Fertig“ zeigt ihn zum Kopieren. Kennt die `config.example.php` den Schlüssel nicht (Vorlage vor v0.39), bleibt es bei einer Protokollzeile.
+- **Wiederholen/Aktualisieren** (Schritt „config.php: app.key nachtragen“, nach dem neuen Programmcode, nicht fatal): nur wenn die `config.example.php` des Programmcodes `app.key` kennt und er in der `config.php` **fehlt oder leer** ist. Ein vorhandener Schlüssel wird **nie** geändert; ist er ungültig, ändert SNAIL gar nichts und warnt („Fertig“).
+  1. Zustand per `php -r` (nur Zustände wie fehlt/leer/gültig/ungültig, nie Werte).
+  2. Text ergänzen: im Bereich `'app' => [` (oberste Ebene, genau einmal) `'key' => ''` füllen bzw. eine Zeile vor dem schließenden `]` einfügen (Einrückung der Nachbarn, Kommentar „von SNAIL ergaenzt“); Kommentare, Reihenfolge, Zeilenenden und ein BOM bleiben. Bei derselben Gelegenheit kommen `app.key_previous` und `mail.redirect_to` als `''` dazu, falls sie fehlen (feste Liste, kein allgemeiner Abgleich), und `CONFIG_VERSION` 3 → 4, aber nur wenn danach **kein** Schlüssel der Vorlage mehr fehlt.
+  3. `config.php.neu` → `php -l` → **Vergleich in PHP**: beide Dateien laden, die neuen Werte müssen stimmen (Sollwerte über die Standardeingabe), alle anderen Werte gleich (Typ und Reihenfolge); die Ausgabe nennt nur Schlüsselnamen, nie Werte. Die `config.php` darf sich seit dem Lesen nicht geändert haben.
+  4. Erst dann Sicherung `<Datenordner>\Sicherung\config.php.vor-snail-<JJJJMMTT_HHMMSS>` (nur Administratoren/SYSTEM – sie enthält das DB-Passwort; im Programmordner würde `robocopy /MIR` sie beim nächsten Update löschen) und atomar ersetzen (`[IO.File]::Replace`, die Rechte der `config.php` bleiben). Der Schlüssel kommt in die Zugangsdatei und auf „Fertig“.
+  5. Geht etwas schief (Bereich `app` in einer Zeile, Schlüssel doppelt oder in `"…"`, `php -l`, Vergleich): `config.php` bleibt unverändert, `.neu` wird gelöscht. „Fertig“ zeigt einen fertigen Schlüssel **zum Selbsteintragen** – er gilt erst, wenn er in der `config.php` steht, und darf nur eingetragen werden, wenn `app.key` dort wirklich fehlt oder leer ist.
+- Der Schlüssel steht nie im Protokoll und nie auf einer Kommandozeile. Ein zweiter Lauf ändert nichts (keine weitere Sicherung).
 
 ## PostgreSQL
 
@@ -204,15 +218,16 @@ Die Website bindet `*:<port>`; „nur lokal“ heißt: **keine** Firewallregel �
 | Ort | Inhalt |
 |---|---|
 | `C:\ProgramData\SNAIL\snail_JJJJMMTT_HHMMSS.log` | Protokoll je Lauf (ohne Passwörter – die Zeile mit dem Initialpasswort wird geschwärzt) |
-| `C:\ProgramData\SNAIL\zugangsdaten\<Ordner>.txt` | Adresse, Datenbank, DB-Passwort, Admin-Login und Initialpasswort – abgelegt, sobald der Wert feststeht. **Nach dem Übertragen in den Passwortmanager löschen** |
+| `C:\ProgramData\SNAIL\zugangsdaten\<Ordner>.txt` | Adresse, Datenbank, DB-Passwort, `app_key` (= `app.key`, mit der `config.php` sichern), Admin-Login und Initialpasswort – abgelegt, sobald der Wert feststeht. **Nach dem Übertragen in den Passwortmanager löschen** |
 | `C:\ProgramData\SNAIL\pruefberichte\<Ordner>_<Zeit>.txt` | Bericht von `tools\windows-pruefung.ps1` |
 | `<Datenordner>\Sicherung\<Zeit>\` | `pg_dump` und `config.php` vor einem Update. SNAIL löscht sie nie, „Prüfen“ zeigt Anzahl und Größe. Der Data-Ordner gehört in die reguläre Sicherung |
+| `<Datenordner>\Sicherung\config.php.vor-snail-<Zeit>` | `config.php` vor dem Nachtragen von `app.key` (enthält das DB-Passwort). SNAIL löscht sie nie automatisch |
 
 `C:\ProgramData\SNAIL` und `Sicherung` sind nur für Administratoren und SYSTEM lesbar.
 
 ## Voraussetzungen
 
-- Windows Server 2022/2025, eingerichtet mit **WIPP** (IIS mit CGI, URL Rewrite 2, PHP 8.3+ NTS mit `pdo_pgsql` usw., PostgreSQL ab 14) – oder gleichwertig von Hand; dann `phpExe`/`psqlBin` im Katalog setzen
+- Windows Server 2022/2025, eingerichtet mit **WIPP** (IIS mit CGI, URL Rewrite 2, PHP 8.5+ NTS mit `pdo_pgsql` usw., PostgreSQL ab 18 – maßgeblich ist `requirements` der Vorlage, ohne Angabe gilt 8.5.0 / 18) – oder gleichwertig von Hand; dann `phpExe`/`psqlBin` im Katalog setzen
 - Administratorrechte; SNAIL fordert sie beim Start selbst an
 - Windows PowerShell 5.1 (im System enthalten), .NET Framework ≥ 4.7.2 (SCRAM-Hash)
 - Programmcode der Anwendung als ZIP (GitHub „Download ZIP“; der Zwischenordner `<repo>-<branch>\` wird erkannt)
@@ -246,21 +261,22 @@ Neben die EXE gehören `projekte.json`, der Ordner `logos\` und gern die ZIP-Dat
 
 ## Tests
 
-Unter Linux geprüft (PowerShell 7, PHP 8.3, PostgreSQL 16): Parser und PSScriptAnalyzer ohne Befund, dazu `tests/SNAIL.Tests.ps1` – lädt die Funktionen über den Parser (die Oberfläche startet nicht) und prüft gegen die echte projektvorlage:
+Unter Linux geprüft (PowerShell 7, PHP 8.5, PostgreSQL 18): Parser und PSScriptAnalyzer ohne Befund, dazu `tests/SNAIL.Tests.ps1` – lädt die Funktionen über den Parser (die Oberfläche startet nicht) und prüft gegen die echte projektvorlage:
 
 - Kommandozeilen-Maskierung als Rundreise über `php`
 - Katalog: Datei im Repository (Logos als Dateien), eingebaute Vorlage, Fehlerfälle, altes Format
 - Eingaben: Standardwerte, Fehlerfälle, Cloudflare/Mail, angepasste Pfade, zweiter Mandant (`<dienst>-<installation>`), schon installiert, belegter Name; Datenpfade (absolut, nicht im Programmordner, Temp/Data auf einem Laufwerk, UNC); Ports (IIS-Binding, Listener, `excludedportrange`, nächster freier); Firewall-Vorschau
 - `config.php` aus der echten `config.example.php`: Escaping, ohne BOM, `php -l`, Ladeversuch, Schlüssel-Abgleich, optionaler Schlüssel `python.exe`
+- `app.key`: Format (gegen `SecretBox::parseKey` der Vorlage), Neuinstallation, Vorlage ohne Schlüssel; Ergänzen als Text (Bereich vorhanden/fehlend/in einer Zeile/doppelt, Schlüssel leer/vorhanden/in `"…"`, letzte Zeile ohne Komma, verschachtelter `key`, CRLF, Kommentare bleiben) und als Datei (Update v0.37 → v0.39 mit Sicherung, `CONFIG_VERSION` 4 und `Config::comparisonMessages()` ohne Hinweis, zweiter Lauf ohne Änderung, vorhandener/leerer/ungültiger Schlüssel, BOM, Fallback zum Selbsteintragen, PHP-Vergleich ohne Werte in der Ausgabe), Zugangsdatei
 - Installationen am Server: zwei Mandanten, `config.php` mit BOM, Ordner ohne `config.php`/`bin\console`, älterer Stand ohne `db` in `info`, ausgetauschter Katalog
 - `services.json`: neu, angleichen, fremde Einträge/Felder/Reihenfolge, Ein-Element-Liste und BOM, Regelverstöße – und Lesen mit `ServiceDirectory::parse()` der Vorlage
 - ZIP mit einfachem und doppeltem Zwischenordner
 - Kollisionen: Namensgleichheit `olaf`/`muster` gegen `olaf_muster`, Rolle einer anderen Installation, Rest-Datenbank (Häkchen, nur Rolle, nicht lesbare Installation), Fortsetzen nach Abbruch (Zugangsdatei passend, älter, anderer Name, ohne Ordner), Ordnername `olaf` + `a-b` gegen `olaf-a` + `b`, fremde Website, fremder und verwaister App-Pool
 - PostgreSQL: Superuser über pgpass (Passwort mit `:` und `\`), Rolle + Datenbank anlegen und wiederholen, Anmeldung mit dem SCRAM-Hash, fremder Eigentümer, Benutzerzahl; Rest-Datenbank: Sperre ohne Häkchen, Übernahme mit (alte Daten mit neuem Passwort lesbar), Fortsetzen ohne
-- Durchlauf: Rolle/Datenbank → `config.php` → `migrate` → `user:create` (Umlaute im Namen) → `services.json` (url angleichen) → `check` mit Exit 0 → Erkennung am Server über `info` → Sicherung nach `<Datenordner>\Sicherung`
+- Durchlauf: Rolle/Datenbank → `config.php` → `migrate` → `user:create` (Umlaute im Namen) → `services.json` (url angleichen) → `check` mit Exit 0 (Zeile `app.key` OK, keine fehlenden Schlüssel) → Erkennung am Server über `info` → Sicherung nach `<Datenordner>\Sicherung`
 
 ```sh
-pwsh tests/SNAIL.Tests.ps1 -Vorlage ../projektvorlage -PgPassword '<postgres>' -PgBin /usr/lib/postgresql/16/bin
+pwsh tests/SNAIL.Tests.ps1 -Vorlage ../projektvorlage -PgPassword '<postgres>' -PgBin /usr/lib/postgresql/18/bin
 pwsh -c "Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1"
 ```
 
@@ -279,3 +295,5 @@ Was nur Windows zeigen kann (Oberfläche, appcmd, icacls, robocopy, Firewall, Wi
 
 - SNAIL legt Datenbanken mit Superuser-Rechten an und führt Skripte der Vorlage (`aufgabe_erstellen.ps1`, `windows-pruefung.ps1`) als Administrator aus – nur Programmcode aus vertrauenswürdiger Quelle installieren.
 - `C:\ProgramData\SNAIL\zugangsdaten\` und `C:\ProgramData\WIPP\postgres-zugangsdaten.txt` enthalten Klartextpasswörter: nach dem Übertragen in den Passwortmanager löschen. SNAIL fragt das Superuser-Passwort dann von Hand ab.
+- `app.key` gehört in den Passwortmanager und mit der `config.php` in die Sicherung: geht er verloren, sind die in der Datenbank gespeicherten Passwörter (Mailkonten) nicht mehr lesbar. Einen vorhandenen Schlüssel nie ersetzen; Wechsel nur über `app.key_previous` und `php bin\console app:key-rotate` (Vorlage, `docs/03`).
+- `config.php.vor-snail-*` in `<Datenordner>\Sicherung` enthält das DB-Passwort (nur Administratoren/SYSTEM) und wird nicht automatisch gelöscht.

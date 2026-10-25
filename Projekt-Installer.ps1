@@ -1,9 +1,9 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.2
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.3
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
- (PHP 8.3+, IIS, PostgreSQL, config.php) auf einem Windows Server, der vorher
+ (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
  mit WIPP eingerichtet wurde (IIS, PHP, PostgreSQL, pgAdmin). Der Vertrag
  steht in der projektvorlage: docs/03-installation-betrieb.md.
 
@@ -28,7 +28,12 @@
      mit ZIP  = Aktualisieren: Sicherung (pg_dump + config.php nach
      <Datenordner>\Sicherung, abwaehlbar nur mit Bestaetigung) -> App-Pool
      anhalten -> robocopy /MIR (config.php mit vollem Pfad ausgenommen) ->
-     IIS/Rechte angleichen -> migrate -> services.json -> Aufgabe -> check
+     IIS/Rechte angleichen -> app.key nachtragen (nur wenn er fehlt) -> migrate
+     -> services.json -> Aufgabe -> check
+   app.key (Schluessel fuer Geheimnisse in der Datenbank): bei der
+   Neuinstallation erzeugt; bei Wiederholen/Aktualisieren nur ein fehlender
+   oder leerer nachgetragen, ein vorhandener NIE geaendert (Update-
+   InstalledConfigKeys: php -l, Vergleich aller Werte, Sicherung, atomar).
    Bindings einer vorhandenen Website fasst SNAIL nie an.
 
  NAMEN
@@ -48,10 +53,11 @@
 
  ABLAGE (C:\ProgramData\SNAIL, nur Administratoren und SYSTEM)
    snail_JJJJMMTT_HHMMSS.log  Protokoll je Lauf
-   zugangsdaten\<Ordner>.txt   DB-Passwort und Admin-Initialpasswort
+   zugangsdaten\<Ordner>.txt   DB-Passwort, app.key und Admin-Initialpasswort
    pruefberichte\...           Berichte von tools\windows-pruefung.ps1
  Sicherungen vor einem Update: <Datenordner>\Sicherung\<Zeit>\ (ebenfalls nur
- Administratoren/SYSTEM; robocopy /MIR wuerde sie im Programmordner loeschen).
+ Administratoren/SYSTEM; robocopy /MIR wuerde sie im Programmordner loeschen),
+ dort auch config.php.vor-snail-<Zeit> vor dem Nachtragen von app.key.
 
  ALS EXE: Build-Projekt-Installer.ps1 (PS2EXE, -noConsole -requireAdmin -STA)
 
@@ -129,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.2'
+$script:AppVersion = '7.3'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -425,6 +431,24 @@ function New-RandomPassword {
     } finally {
         $rng.Dispose()
     }
+}
+
+# Schluessel fuer app.key (Geheimnisse in der Datenbank, SecretBox der Vorlage):
+# Base64 (Standard-Alphabet mit =) von 32 Zufallsbytes = 44 Zeichen. Der Wert
+# kommt nie ins Protokoll und nie auf eine Kommandozeile.
+function New-AppKey {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return [Convert]::ToBase64String($bytes)
+}
+
+# Gueltiger app.key? Wie SecretBox::parseKey der Vorlage: 44 Zeichen Base64, 32 Byte.
+function Test-AppKey {
+    param([AllowNull()][AllowEmptyString()][string]$Key)
+    $k = ([string]$Key).Trim()
+    if ($k -cnotmatch '^[A-Za-z0-9+/]{43}=$') { return $false }
+    try { return ([Convert]::FromBase64String($k).Length -eq 32) } catch { return $false }
 }
 
 # ==============================================================================
@@ -839,10 +863,10 @@ function Set-ConfigTemplateValues {
  python.exe gehoert zu den optionalen Schluesseln: Er wird nur gesetzt, wenn
  die config.example.php des Projekts ihn enthaelt.
 #>
-$script:OptionalConfigKeys = @('python.exe')
+$script:OptionalConfigKeys = @('python.exe', 'app.key')
 
 function Get-ConfigValues {
-    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword)
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '')
     $inst = $Plan.Inst
     $v = [ordered]@{
         'app.name'           = $inst.Service.Name
@@ -879,6 +903,7 @@ function Get-ConfigValues {
         if ($inst.Mail.FromName) { $v['mail.from_name'] = $inst.Mail.FromName }
     }
     if ($Plan.PythonExe) { $v['python.exe'] = $Plan.PythonExe }
+    if ($AppKey) { $v['app.key'] = $AppKey }
     return $v
 }
 
@@ -888,14 +913,14 @@ function Get-ConfigValues {
  pruefen, dann umbenennen. Eine vorhandene config.php wird nie ueberschrieben.
 #>
 function Write-ProjectConfig {
-    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword)
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '')
     $target  = Join-Path $Plan.ProgDir 'config.php'
     $example = Join-Path $Plan.ProgDir 'config.example.php'
     if (Test-Path -LiteralPath $target) { throw "config.php existiert bereits: $target" }
     if (-not (Test-Path -LiteralPath $example)) { throw "config.example.php nicht gefunden: $example" }
 
     $text = [System.IO.File]::ReadAllText($example, [System.Text.Encoding]::UTF8)
-    $values = Get-ConfigValues -Plan $Plan -DbPassword $DbPassword
+    $values = Get-ConfigValues -Plan $Plan -DbPassword $DbPassword -AppKey $AppKey
     $r = Set-ConfigTemplateValues -Text $text -Values $values
     $missing = @($r.Missing | Where-Object { $script:OptionalConfigKeys -notcontains $_ })
     if ($missing.Count -gt 0) {
@@ -937,10 +962,318 @@ function Read-InstalledConfig {
     return ($r.Output.Substring($pos) | ConvertFrom-Json)
 }
 
+<#
+ Ergaenzt Schluessel im Text einer VORHANDENEN config.php, ohne sonst etwas
+ anzufassen (app.key und die anderen Schluessel von CONFIG_VERSION 4).
+ Zeilenweise wie Set-ConfigTemplateValues, aber strenger:
+   - Bereiche nur auf oberster Ebene ('app' => [ ... ],), jeder genau einmal
+   - steht der Schluessel schon da, wird sein Literal nur ersetzt, wenn es
+     ein erlaubter alter Wert ist (Standard '' oder null) - ein vorhandener
+     Wert wird nie ueberschrieben
+   - fehlt er, kommt er vor das schliessende ] des Bereichs (Einrueckung wie
+     die Nachbarn, fehlendes Komma der Vorzeile ergaenzt)
+ Alles Unerwartete (Bereich fehlt, doppelt oder in einer Zeile, Schluessel
+ doppelt) liefert Error und den unveraenderten Text. Ob das Ergebnis stimmt,
+ prueft danach PHP (Test-ConfigEdit) - der Text allein reicht nicht.
+ $Values: Punkt-Schreibweise mit hoechstens einer Ebene ('app.key',
+ 'CONFIG_VERSION'). $Allowed: je Schluessel die erlaubten alten Literale.
+ Fehlertexte nennen nur Schluesselnamen, nie Werte.
+#>
+function Add-ConfigKeys {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)]$Values, [hashtable]$Allowed = @{})
+    $literal = "(?:'(?:[^'\\]|\\.)*'|-?\d+(?:\.\d+)?|true|false|null)"
+    $rxPair  = [regex]("^(\s*'([A-Za-z0-9_]+)'\s*=>\s*)(" + $literal + ")(\s*,?\s*(?://.*|/\*.*)?)$")
+    $rxOpen  = [regex]"^(\s*)'([A-Za-z0-9_]+)'\s*=>\s*\[\s*(?://.*)?$"
+    $rxClose = [regex]'^(\s*)\]\s*([,;]?)\s*(?://.*)?$'
+    $fail = { param([string]$Msg) [pscustomobject]@{ Text = $Text; Changed = @(); Error = $Msg } }
+
+    $nl = if ($Text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($l in ($Text -split "`r?`n")) { $lines.Add($l) }
+
+    # 1) Aufbau erfassen: Art jeder Zeile, Paare mit Pfad, Bereiche der obersten Ebene
+    $kind = New-Object string[] $lines.Count
+    $pairs = New-Object System.Collections.Generic.List[object]
+    $sections = @{}
+    $stack = New-Object System.Collections.Generic.List[object]
+    $inBlock = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]; $trim = $line.Trim()
+        if ($inBlock) { if ($trim.Contains('*/')) { $inBlock = $false }; $kind[$i] = 'comment'; continue }
+        if ($trim -eq '') { $kind[$i] = 'blank'; continue }
+        if ($trim.StartsWith('/*')) { if (-not $trim.Contains('*/')) { $inBlock = $true }; $kind[$i] = 'comment'; continue }
+        if ($trim.StartsWith('//') -or $trim.StartsWith('#')) { $kind[$i] = 'comment'; continue }
+        $m = $rxOpen.Match($line)
+        if ($m.Success) {
+            $kind[$i] = 'open'
+            $name = $m.Groups[2].Value
+            $top = ($stack.Count -eq 0)
+            $stack.Add(@{ Name = $name; Top = $top })
+            if ($top) {
+                if ($sections.ContainsKey($name)) { $sections[$name].Count++ }
+                else { $sections[$name] = @{ Open = $i; Close = -1; Count = 1; Indent = $m.Groups[1].Value } }
+            }
+            continue
+        }
+        $m = $rxClose.Match($line)
+        if ($m.Success) {
+            $kind[$i] = 'close'
+            if ($stack.Count -gt 0) {
+                $s = $stack[$stack.Count - 1]
+                $stack.RemoveAt($stack.Count - 1)
+                if ($s.Top -and $sections[$s.Name].Close -lt 0) { $sections[$s.Name].Close = $i }
+            }
+            continue
+        }
+        $m = $rxPair.Match($line)
+        if ($m.Success) {
+            $kind[$i] = 'pair'
+            $path = (@($stack | ForEach-Object { $_.Name }) + $m.Groups[2].Value) -join '.'
+            $pairs.Add(@{ Index = $i; Path = $path; Prefix = $m.Groups[1].Value; Literal = $m.Groups[3].Value; Suffix = $m.Groups[4].Value })
+            continue
+        }
+        $kind[$i] = 'other'
+    }
+
+    # 2) Ersetzen bzw. zum Einfuegen vormerken
+    $insert = @{}
+    $changed = New-Object System.Collections.Generic.List[string]
+    foreach ($key in $Values.Keys) {
+        $path = [string]$key
+        $parts = $path.Split('.')
+        if ($parts.Count -gt 2) { return (& $fail "$path`: nur eine Ebene wird unterstützt") }
+        $hits = @($pairs | Where-Object { $_.Path -ceq $path })
+        if ($hits.Count -gt 1) { return (& $fail "$path steht mehrfach in der config.php") }
+        if ($hits.Count -eq 1) {
+            $h = $hits[0]
+            $ok = if ($Allowed.ContainsKey($path)) { @($Allowed[$path]) } else { @("''", 'null') }
+            if ($ok -cnotcontains $h.Literal) { return (& $fail "$path hat schon einen Wert - wird nicht geändert") }
+            $lines[$h.Index] = $h.Prefix + (ConvertTo-PhpLiteral $Values[$key]) + $h.Suffix
+            $changed.Add($path)
+            continue
+        }
+        if ($parts.Count -eq 1) { return (& $fail "$path fehlt auf oberster Ebene - wird nicht ergänzt") }
+        $sec = $parts[0]
+        if (-not $sections.ContainsKey($sec)) { return (& $fail "Bereich '$sec' => [ ... ] nicht gefunden (oder nicht in der üblichen Schreibweise)") }
+        if ($sections[$sec].Count -gt 1) { return (& $fail "Bereich '$sec' steht mehrfach in der config.php") }
+        if ($sections[$sec].Close -lt 0) { return (& $fail "Ende des Bereichs '$sec' nicht gefunden") }
+        # z. B. "key" in doppelten Anfuehrungszeichen: nicht als Paar erkannt, aber vorhanden
+        $rxAny = [regex]("^\s*['""]" + [regex]::Escape($parts[1]) + "['""]\s*=>")
+        for ($j = $sections[$sec].Open + 1; $j -lt $sections[$sec].Close; $j++) {
+            if ($kind[$j] -eq 'other' -and $rxAny.IsMatch($lines[$j])) { return (& $fail "$path steht in einer Schreibweise da, die SNAIL nicht sicher ändern kann") }
+        }
+        if (-not $insert.ContainsKey($sec)) { $insert[$sec] = New-Object System.Collections.Generic.List[string] }
+        $insert[$sec].Add($path)
+    }
+
+    # 3) Einfuegen, von hinten nach vorn (Zeilennummern davor bleiben gueltig)
+    foreach ($sec in @($insert.Keys | Sort-Object { $sections[$_].Close } -Descending)) {
+        $s = $sections[$sec]
+        $last = -1
+        for ($j = $s.Close - 1; $j -gt $s.Open; $j--) {
+            if ($kind[$j] -ne 'blank' -and $kind[$j] -ne 'comment') { $last = $j; break }
+        }
+        $indent = $null
+        foreach ($p in $pairs) {
+            if ($p.Index -gt $s.Open -and $p.Index -lt $s.Close -and $p.Path.Split('.').Count -eq 2) { $indent = ($p.Prefix -replace "^(\s*).*$", '$1'); break }
+        }
+        if ($null -eq $indent) { $indent = $s.Indent + '    ' }
+        if ($last -ge 0) {
+            $code = $lines[$last]
+            if ($kind[$last] -eq 'pair') {
+                $m = $rxPair.Match($code)
+                if (-not $m.Groups[4].Value.TrimStart().StartsWith(',')) { $lines[$last] = $m.Groups[1].Value + $m.Groups[3].Value + ',' + $m.Groups[4].Value }
+            } elseif ($kind[$last] -eq 'close') {
+                $m = $rxClose.Match($code)
+                if ($m.Groups[2].Value -eq ';') { return (& $fail "Bereich '$sec' unerwartet aufgebaut") }
+                if ($m.Groups[2].Value -eq '') { $lines[$last] = $code.Substring(0, $code.IndexOf(']') + 1) + ',' + $code.Substring($code.IndexOf(']') + 1) }
+            } else {
+                return (& $fail "Bereich '$sec' enthält Zeilen, die SNAIL nicht sicher lesen kann - bitte von Hand ergänzen")
+            }
+        }
+        $new = New-Object System.Collections.Generic.List[string]
+        $new.Add($indent + '// von SNAIL ergaenzt (Erklaerung in der config.example.php)')
+        foreach ($path in $insert[$sec]) {
+            $new.Add(("{0}'{1}' => {2}," -f $indent, $path.Split('.')[1], (ConvertTo-PhpLiteral $Values[$path])))
+            $changed.Add($path)
+        }
+        $lines.InsertRange($s.Close, $new)
+    }
+    $order = @($Values.Keys | ForEach-Object { [string]$_ })
+    return [pscustomobject]@{ Text = ($lines -join $nl); Changed = @($order | Where-Object { $changed -contains $_ }); Error = '' }
+}
+
+# PHP-Hilfen fuer das Ergaenzen. Einzeilig (php -r), ohne //-Kommentare.
+# Beide geben nur Schluesselnamen und Zustaende aus, NIE Werte - auch nicht
+# im Fehlerfall (die config.php enthaelt das DB-Passwort).
+$script:PhpConfigHelpers = @'
+function snail_has($a, $p) { foreach (explode('.', $p) as $k) { if (!is_array($a) || !array_key_exists($k, $a)) { return [false, null]; } $a = $a[$k]; } return [true, $a]; }
+function snail_unset(&$a, $p) { $k = explode('.', $p); if (count($k) === 1) { unset($a[$k[0]]); } elseif (isset($a[$k[0]]) && is_array($a[$k[0]])) { unset($a[$k[0]][$k[1]]); } }
+function snail_keys($a, $p = '') { $o = []; foreach ($a as $k => $v) { if (is_array($v) && $v !== [] && !array_is_list($v)) { $o = array_merge($o, snail_keys($v, $p . $k . '.')); } else { $o[] = $p . $k; } } return $o; }
+function snail_diff($a, $b, $p = '') { if (is_array($a) && is_array($b)) { $o = []; foreach (array_unique(array_merge(array_keys($a), array_keys($b))) as $k) { if (!array_key_exists($k, $a) || !array_key_exists($k, $b)) { $o[] = $p . $k; } else { $o = array_merge($o, snail_diff($a[$k], $b[$k], $p . $k . '.')); } } if ($o === [] && $a !== $b) { $o[] = ($p === '' ? '(Reihenfolge)' : rtrim($p, '.')); } return $o; } return $a === $b ? [] : [($p === '' ? '(Datei)' : rtrim($p, '.'))]; }
+'@
+
+$script:PhpConfigState = $script:PhpConfigHelpers + @'
+$c = require $argv[1]; $e = require $argv[2];
+if (!is_array($c) || !is_array($e)) { echo json_encode(['error' => 'kein Array']); exit(1); }
+$o = ['keys' => [], 'version' => (is_int($c['CONFIG_VERSION'] ?? null) ? $c['CONFIG_VERSION'] : null), 'example_version' => (is_int($e['CONFIG_VERSION'] ?? null) ? $e['CONFIG_VERSION'] : null), 'missing' => array_values(array_diff(snail_keys($e), snail_keys($c)))];
+foreach (['app.key', 'app.key_previous', 'mail.redirect_to'] as $k) { [$f, $v] = snail_has($c, $k); [$fe] = snail_has($e, $k); if (!$f) { $s = 'missing'; } elseif ($v === null || $v === '') { $s = 'empty'; } elseif ($k !== 'app.key') { $s = 'set'; } else { $t = is_string($v) ? trim($v) : ''; $r = strlen($t) === 44 ? base64_decode($t, true) : false; $s = ($r !== false && strlen($r) === 32) ? 'valid' : 'invalid'; } $o['keys'][$k] = ['state' => $s, 'example' => $fe]; }
+echo json_encode($o);
+'@
+
+$script:PhpConfigVerify = $script:PhpConfigHelpers + @'
+$old = require $argv[1]; $new = require $argv[2]; $e = require $argv[3];
+$want = json_decode(stream_get_contents(STDIN), true);
+if (!is_array($old) || !is_array($new) || !is_array($e) || !is_array($want)) { echo json_encode(['ok' => false, 'error' => 'kein Array']); exit(1); }
+$o = ['wrong' => [], 'differs' => [], 'missing' => []];
+foreach ($want as $k => $v) { [$f, $nv] = snail_has($new, $k); if (!$f || $nv !== $v) { $o['wrong'][] = $k; } snail_unset($old, $k); snail_unset($new, $k); }
+$o['differs'] = snail_diff($old, $new);
+$o['missing'] = array_values(array_diff(snail_keys($e), snail_keys(require $argv[2])));
+$o['ok'] = ($o['wrong'] === [] && $o['differs'] === []);
+echo json_encode($o);
+'@
+
+# PHP-Hilfe ausfuehren; liefert das JSON-Ergebnis. Ausgabe und Fehlertext
+# kommen nie ins Protokoll oder in die Meldung.
+function Invoke-PhpConfigHelper {
+    param([Parameter(Mandatory)][string]$PhpExe, [Parameter(Mandatory)][string]$Code, [string[]]$Arguments = @(), [string]$StdIn = '')
+    $oneLine = ($Code -replace "\r?\n", ' ')
+    $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs (@('-r', $oneLine) + $Arguments)) -StdIn $StdIn -Utf8Output -TimeoutSec 60
+    $pos = $r.Output.IndexOf('{')
+    if ($pos -lt 0) { throw "PHP konnte die config.php nicht auswerten (Exit-Code $($r.ExitCode))." }
+    $j = $null
+    try { $j = $r.Output.Substring($pos) | ConvertFrom-Json } catch { }
+    if ($null -eq $j -or $r.ExitCode -ne 0) { throw "PHP konnte die config.php nicht auswerten (Exit-Code $($r.ExitCode))." }
+    return $j
+}
+
+# Kopie der config.php vor einer Aenderung durch SNAIL nach
+# <Datenordner>\Sicherung\config.php.vor-snail-<Zeit> (nur Administratoren/
+# SYSTEM; im Programmordner wuerde robocopy /MIR sie beim naechsten Update
+# loeschen). Enthaelt das DB-Passwort; SNAIL loescht sie nie.
+function Backup-ConfigFile {
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][byte[]]$Bytes)
+    $root = Get-BackupRoot -Plan $Plan
+    if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+    Protect-AdminOnly -Path $root
+    $file = [System.IO.Path]::Combine($root, ('config.php.vor-snail-{0:yyyyMMdd_HHmmss}' -f (Get-Date)))
+    [System.IO.File]::WriteAllBytes($file, [byte[]]@())
+    Protect-AdminOnly -Path $file
+    [System.IO.File]::WriteAllBytes($file, $Bytes)
+    return $file
+}
+
+<#
+ app.key in einer vorhandenen config.php nachtragen (Wiederholen/Aktualisieren),
+ dazu app.key_previous und mail.redirect_to als '' - nur was fehlt, nur wenn
+ die config.example.php des Programmcodes sie kennt. CONFIG_VERSION 3 -> 4
+ nur, wenn danach kein Schluessel der Vorlage mehr fehlt.
+   1. Zustand per PHP (nur Zustaende, keine Werte). app.key gueltig -> nur
+      die anderen ergaenzen; ungueltig -> gar nichts aendern (Warnung)
+   2. Text ergaenzen (Add-ConfigKeys) -> config.php.neu (BOM wie vorher)
+   3. php -l, dann PHP-Vergleich: neue Werte wie gewollt, alle anderen
+      Werte unveraendert (Typ und Reihenfolge), Original seit dem Lesen gleich
+   4. erst dann Sicherung und atomar ersetzen ([IO.File]::Replace behaelt die
+      Rechte der config.php)
+ Jeder Fehler: .neu weg, config.php unveraendert; fehlte app.key, zeigt
+ "Fertig" einen Schluessel zum Selbsteintragen (Status manual).
+ Status: none (Vorlage ohne app.key) | present | invalid | added | manual | failed
+#>
+$script:ConfigV4Keys = @('app.key_previous', 'mail.redirect_to')
+
+function Update-InstalledConfigKeys {
+    param([Parameter(Mandatory)]$Plan)
+    $res = [pscustomobject]@{ Status = 'none'; Key = ''; Changed = @(); Backup = ''; Text = '' }
+    $file = Join-Path $Plan.ProgDir 'config.php'
+    $example = Join-Path $Plan.ProgDir 'config.example.php'
+    if (-not (Test-ConfigTemplateKey -ExampleFile $example -Key 'app.key')) {
+        $res.Text = 'Die config.example.php dieses Programmstands kennt app.key nicht - nichts zu ergänzen.'
+        return $res
+    }
+    $orig = [System.IO.File]::ReadAllBytes($file)
+    $st = Invoke-PhpConfigHelper -PhpExe $Plan.PhpExe -Code $script:PhpConfigState -Arguments @($file, $example)
+    $keyState = [string]$st.keys.'app.key'.state
+    if ($keyState -eq 'invalid') {
+        $res.Status = 'invalid'
+        $res.Text = 'app.key in der config.php ist kein gültiger Schlüssel (Base64 von 32 Byte, 44 Zeichen). SNAIL ändert nichts - ein falscher Schlüssel macht gespeicherte Passwörter unlesbar. Bitte den richtigen Schlüssel aus Sicherung/Passwortmanager eintragen; nur wenn noch nie Passwörter gespeichert wurden, einen neuen (php bin\console app:key).'
+        return $res
+    }
+    $values = [ordered]@{}
+    if ($keyState -eq 'missing' -or $keyState -eq 'empty') { $res.Key = New-AppKey; $values['app.key'] = $res.Key }
+    foreach ($k in $script:ConfigV4Keys) {
+        if ($st.keys.$k.example -and [string]$st.keys.$k.state -eq 'missing') { $values[$k] = '' }
+    }
+    $allowed = @{}
+    $rest = @($st.missing | Where-Object { -not $values.Contains([string]$_) })
+    if ($values.Count -gt 0 -and $st.version -eq 3 -and $st.example_version -eq 4 -and $rest.Count -eq 0) {
+        $values['CONFIG_VERSION'] = 4
+        $allowed['CONFIG_VERSION'] = @('3')
+    }
+    if ($values.Count -eq 0) {
+        $res.Status = 'present'
+        $res.Text = 'app.key ist gesetzt und gültig - config.php unverändert.'
+        return $res
+    }
+    $res.Status = if ($res.Key) { 'added' } else { 'present' }
+
+    $neu = $file + '.neu'
+    try {
+        $bom = ($orig.Length -ge 3 -and $orig[0] -eq 0xEF -and $orig[1] -eq 0xBB -and $orig[2] -eq 0xBF)
+        $off = if ($bom) { 3 } else { 0 }
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $text = $utf8.GetString($orig, $off, $orig.Length - $off)
+        $edit = Add-ConfigKeys -Text $text -Values $values -Allowed $allowed
+        if ($edit.Error) { throw $edit.Error }
+        $body = $utf8.GetBytes($edit.Text)
+        $bytes = if ($bom) { [byte[]](@(0xEF, 0xBB, 0xBF) + $body) } else { $body }
+        [System.IO.File]::WriteAllBytes($neu, $bytes)
+
+        $lint = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs @('-l', $neu)) -Utf8Output -TimeoutSec 60
+        if ($lint.ExitCode -ne 0) {
+            $zeile = if ($lint.Output -match 'on line (\d+)') { " (Zeile $($Matches[1]))" } else { '' }
+            throw "php -l meldet einen Fehler in der ergänzten Datei$zeile."
+        }
+        $want = New-Object System.Text.StringBuilder
+        [void]$want.Append('{')
+        $first = $true
+        foreach ($k in $values.Keys) {
+            if (-not $first) { [void]$want.Append(',') }
+            $first = $false
+            $v = $values[$k]
+            $json = if ($v -is [int]) { [string]$v } else { '"' + ([string]$v).Replace('\', '\\').Replace('"', '\"') + '"' }
+            [void]$want.Append('"' + $k + '":' + $json)
+        }
+        [void]$want.Append('}')
+        $chk = Invoke-PhpConfigHelper -PhpExe $Plan.PhpExe -Code $script:PhpConfigVerify -Arguments @($file, $neu, $example) -StdIn $want.ToString()
+        if (-not $chk.ok) {
+            $why = @()
+            if (@($chk.wrong).Count -gt 0) { $why += 'nicht wie gewollt gesetzt: ' + (@($chk.wrong) -join ', ') }
+            if (@($chk.differs).Count -gt 0) { $why += 'sonst abweichend: ' + (@($chk.differs) -join ', ') }
+            throw ('Prüfung nach dem Ergänzen fehlgeschlagen (' + ($why -join '; ') + ').')
+        }
+        if ($values.Contains('CONFIG_VERSION') -and @($chk.missing).Count -gt 0) {
+            throw ('Nach dem Ergänzen fehlen noch Schlüssel der Vorlage: ' + (@($chk.missing) -join ', ') + '.')
+        }
+        if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String($orig)) {
+            throw 'Die config.php wurde während des Laufs geändert.'
+        }
+        $res.Backup = Backup-ConfigFile -Plan $Plan -Bytes $orig
+        [System.IO.File]::Replace($neu, $file, [NullString]::Value)
+        $res.Changed = @($edit.Changed)
+        $res.Text = ('Ergänzt: {0} (php -l und Vergleich ohne Befund, alle anderen Werte unverändert). Vorheriger Stand: {1}' -f ($res.Changed -join ', '), $res.Backup)
+    } catch {
+        Remove-Item -LiteralPath $neu -Force -ErrorAction SilentlyContinue
+        $res.Changed = @()
+        $res.Status = if ($res.Key) { 'manual' } else { 'failed' }
+        $res.Text = 'config.php nicht geändert: ' + $_.Exception.Message
+    }
+    return $res
+}
+
 # requirements und version aus config/app.php der Vorlage (ZIP oder Ordner)
 function Get-TemplateInfo {
     param([Parameter(Mandatory)][string]$Root, [string]$PhpExe)
-    $info = [pscustomobject]@{ Version = ''; PhpMin = '8.3.0'; PgMin = 14; Extensions = @('pdo_pgsql', 'mbstring', 'openssl', 'json', 'ctype', 'fileinfo', 'session') }
+    $info = [pscustomobject]@{ Version = ''; PhpMin = '8.5.0'; PgMin = 18; Extensions = @('pdo_pgsql', 'mbstring', 'openssl', 'json', 'ctype', 'fileinfo', 'session') }
     $file = Join-Path (Join-Path $Root 'config') 'app.php'
     if (-not $PhpExe -or -not (Test-Path -LiteralPath $file)) { return $info }
     $code = '$a = require $argv[1]; echo json_encode(["version" => $a["version"] ?? "", "requirements" => $a["requirements"] ?? null]);'
@@ -2284,7 +2617,7 @@ function Save-InstallCredentials {
         if (-not (Test-Path -LiteralPath $script:CredDir)) { New-Item -ItemType Directory -Path $script:CredDir -Force | Out-Null }
         $map = [ordered]@{}
         $old = Read-KeyValueFile -Path $file
-        $order = @('format', 'dienst', 'installation', 'mandant_name', 'ordner', 'url', 'lokal', 'db_host', 'db_port', 'db_name', 'db_benutzer', 'db_passwort', 'admin_login', 'admin_initialpasswort')
+        $order = @('format', 'dienst', 'installation', 'mandant_name', 'ordner', 'url', 'lokal', 'db_host', 'db_port', 'db_name', 'db_benutzer', 'db_passwort', 'app_key', 'admin_login', 'admin_initialpasswort')
         foreach ($k in $order) { if ($old -and $old.ContainsKey($k)) { $map[$k] = $old[$k] } }
         if ($old) { foreach ($k in $old.Keys) { if (-not $map.Contains($k)) { $map[$k] = $old[$k] } } }
         $map['format'] = [string]$script:FormatVersion
@@ -2301,6 +2634,10 @@ function Save-InstallCredentials {
         [void]$sb.AppendLine('# Diese Datei enthaelt Klartextpasswoerter. Nach dem Uebertragen in den')
         [void]$sb.AppendLine('# Passwortmanager bitte loeschen. Das DB-Passwort steht auch in der config.php,')
         [void]$sb.AppendLine('# das Initialpasswort gilt nur bis zum ersten Login (Wechsel erzwungen).')
+        if ($map.Contains('app_key')) {
+            [void]$sb.AppendLine('# app_key (= app.key in der config.php): mit der config.php sichern und im')
+            [void]$sb.AppendLine('# Passwortmanager ablegen - ohne ihn sind gespeicherte Passwoerter verloren.')
+        }
         foreach ($k in $map.Keys) { [void]$sb.AppendLine(('{0}={1}' -f $k, $map[$k])) }
         Write-SecretFile -Path $file -Text ($sb.ToString() -replace "`r?`n", "`r`n")
         Write-Log "Zugangsdaten abgelegt: $file (nur Administratoren/SYSTEM)" 'Ok'
@@ -2770,7 +3107,7 @@ function Test-Installation {
         $plan.InstalledVersion = $inst.Instance.Version
         if ($UseZip) {
             $plan.Mode = 'update'
-            & $add 'Info' 'Modus' ("Aktualisieren: {0} -> {1} (Sicherung, robocopy, migrate; config.php bleibt)" -f $(if ($plan.InstalledVersion) { $plan.InstalledVersion } else { '?' }), $(if ($plan.Template.Version) { $plan.Template.Version } else { '?' }))
+            & $add 'Info' 'Modus' ("Aktualisieren: {0} -> {1} (Sicherung, robocopy, migrate; config.php bleibt, nur ein fehlender app.key wird nachgetragen)" -f $(if ($plan.InstalledVersion) { $plan.InstalledVersion } else { '?' }), $(if ($plan.Template.Version) { $plan.Template.Version } else { '?' }))
             if ($plan.Paths) {
                 $plan.BackupInfo = Get-BackupInfo -Root (Get-BackupRoot -Plan $plan)
                 & $add 'Info' 'Sicherung' ("pg_dump + config.php nach {0}\<Zeit> - vorhanden: {1}" -f (Get-BackupRoot -Plan $plan), $plan.BackupInfo.Text)
@@ -2778,7 +3115,7 @@ function Test-Installation {
         } else {
             & $add 'Info' 'Modus' "Einrichtung wiederholen (Programmcode bleibt, Version $($plan.InstalledVersion))"
         }
-        & $add 'Ok' 'config.php' "vorhanden - bleibt unverändert ($(Join-Path $plan.ProgDir 'config.php'))"
+        & $add 'Ok' 'config.php' "vorhanden - bleibt unverändert, nur fehlende app.key/app.key_previous/mail.redirect_to werden nachgetragen ($(Join-Path $plan.ProgDir 'config.php'))"
         if ($inst.Instance.InServicesJson -and $inst.Instance.ServicesUrl -ne $inst.Url) {
             & $add 'Info' 'services.json' ("url '{0}' wird an app.url der config.php angeglichen: '{1}'" -f $inst.Instance.ServicesUrl, $inst.Url)
         }
@@ -2948,6 +3285,9 @@ function Get-StepPlan {
         $s.Add(@{ Key = 'db';     Title = 'PostgreSQL: Rolle und Datenbank'; Fatal = $true })
         $s.Add(@{ Key = 'config'; Title = 'config.php aus config.example.php'; Fatal = $true })
     }
+    if ($Plan.Mode -ne 'install') {
+        $s.Add(@{ Key = 'appkey'; Title = 'config.php: app.key nachtragen, falls er fehlt'; Fatal = $false })
+    }
     $s.Add(@{ Key = 'migrate';  Title = 'php bin\console migrate'; Fatal = $true })
     if ($Plan.Mode -ne 'update') {
         $s.Add(@{ Key = 'admin';  Title = 'php bin\console user:create (Administrator)'; Fatal = $true })
@@ -2989,6 +3329,7 @@ function Invoke-Installation {
         ConfigFile = (Join-Path $Plan.ProgDir 'config.php'); ConfigNew = $false
         Db = @{ Name = $Plan.DbName; User = $Plan.DbUser; Password = $null; Source = '' }
         Admin = $null; Migrations = $null; Check = $null; Rows = @(); CredFile = $null; Backup = $null; BackupSkipped = $false; Verify = $null
+        AppKey = [pscustomobject]@{ Status = ''; Key = ''; Changed = @(); Backup = ''; Text = '' }
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $steps = Get-StepPlan -Plan $Plan
@@ -3023,6 +3364,9 @@ function Invoke-Installation {
             $script:Result.Db.Source = 'bei dieser Installation erzeugt'
         }
         Write-Log ("Datenbank {0}, Rolle {1}, Passwort {2}." -f $Plan.DbName, $Plan.DbUser, $script:Result.Db.Source)
+        # app.key: nur fuer eine neue config.php; eine vorhandene behaelt ihren
+        # (Wiederholen/Aktualisieren: Schritt appkey traegt nur einen fehlenden nach)
+        if ($Plan.Mode -eq 'install' -and -not $Plan.ExistingConfig) { $script:Result.AppKey.Key = New-AppKey }
 
         for ($i = 0; $i -lt $steps.Count; $i++) {
             if ($script:AbortRequested) { throw 'Abgebrochen auf Wunsch des Anwenders (nach dem letzten abgeschlossenen Schritt) - beim nächsten Lauf geht es dort weiter.' }
@@ -3065,9 +3409,37 @@ function Invoke-Installation {
                         if (Test-Path -LiteralPath $script:Result.ConfigFile) {
                             Write-Log "config.php vorhanden - wird nicht angetastet: $($script:Result.ConfigFile)"
                         } else {
-                            $f = Write-ProjectConfig -Plan $Plan -DbPassword $script:Result.Db.Password
+                            $f = Write-ProjectConfig -Plan $Plan -DbPassword $script:Result.Db.Password -AppKey $script:Result.AppKey.Key
                             $script:Result.ConfigNew = $true
                             Write-Log "Erzeugt: $f (UTF-8 ohne BOM, php -l ohne Fehler)" 'Ok'
+                            if ($script:Result.AppKey.Key -and (Test-ConfigTemplateKey -ExampleFile (Join-Path $Plan.ProgDir 'config.example.php') -Key 'app.key')) {
+                                $script:Result.AppKey.Status = 'new'
+                                Write-Log 'app.key (Schlüssel für Geheimnisse) erzeugt und in die config.php geschrieben.' 'Ok'
+                                $script:Result.CredFile = Save-InstallCredentials -Plan $Plan -Values @{ app_key = $script:Result.AppKey.Key }
+                            } else {
+                                $script:Result.AppKey.Key = ''
+                            }
+                        }
+                    }
+                    'appkey' {
+                        $k = Update-InstalledConfigKeys -Plan $Plan
+                        $script:Result.AppKey = $k
+                        switch ($k.Status) {
+                            'added' {
+                                Write-Log $k.Text 'Ok'
+                                $script:Result.CredFile = Save-InstallCredentials -Plan $Plan -Values @{ app_key = $k.Key }
+                            }
+                            'manual' {
+                                Write-Log ($k.Text + ' Ein Schlüssel zum Selbsteintragen steht auf "Fertig".') 'Warn'
+                                $rows.Add(@{ Level = 'Warn'; Name = 'app.key'; Text = ($k.Text + ' Schlüssel zum Selbsteintragen: oben unter Zugangsdaten.') })
+                                $state = 'Warn'
+                            }
+                            { $_ -eq 'invalid' -or $_ -eq 'failed' } {
+                                Write-Log $k.Text 'Warn'
+                                $rows.Add(@{ Level = 'Warn'; Name = 'app.key'; Text = $k.Text })
+                                $state = 'Warn'
+                            }
+                            default { Write-Log $k.Text 'Ok' }
                         }
                     }
                     'migrate' {
@@ -3936,6 +4308,21 @@ function Initialize-FinishPage {
     }
     $lines.Add(("Datenbank  : {0}   Rolle: {1}   ({2}:{3})" -f $r.Db.Name, $r.Db.User, $plan.Pg.Host, $plan.Pg.Port))
     if ($plan.Mode -ne 'update' -and $r.Db.Password) { $lines.Add(("DB-Passwort: {0}   ({1})" -f $r.Db.Password, $r.Db.Source)) }
+    $ak = $r.AppKey
+    switch ($ak.Status) {
+        'new'     { $lines.Add(("app.key    : {0}   (bei dieser Installation erzeugt - mit der config.php sichern, im Passwortmanager ablegen)" -f $ak.Key)) }
+        'added'   { $lines.Add(("app.key    : {0}   (in die vorhandene config.php nachgetragen - sichern, im Passwortmanager ablegen)" -f $ak.Key)) }
+        'present' { $lines.Add('app.key    : vorhanden, unverändert') }
+        'invalid' { $lines.Add('app.key    : UNGÜLTIG in der config.php - nicht geändert, siehe Hinweise unten') }
+        'failed'  { $lines.Add('app.key    : vorhanden, unverändert (weitere Schlüssel nicht ergänzt, siehe Hinweise unten)') }
+        'manual'  {
+            $lines.Add('app.key    : NICHT eingetragen - automatisch ging es nicht (siehe Hinweise unten). Vorschlag zum Selbsteintragen:')
+            $lines.Add(("             {0}" -f $ak.Key))
+            $lines.Add("             Gilt erst, wenn er in der config.php unter 'app' => [ 'key' => '...' ] steht. NUR eintragen, wenn")
+            $lines.Add('             app.key dort wirklich fehlt oder leer ist - einen vorhandenen Schlüssel nie ersetzen (Passwörter verloren).')
+        }
+    }
+    if ($ak.Backup) { $lines.Add(("Vorher     : {0}   (config.php vor der Änderung, enthält das DB-Passwort)" -f $ak.Backup)) }
     $lines.Add(("Ordner     : {0}   Daten: {1}" -f $plan.ProgDir, $(if ($plan.DataDir) { $plan.DataDir } else { $plan.Paths.Data })))
     if ($r.Backup) { $lines.Add(("Sicherung  : {0}" -f $r.Backup.Text)) }
     elseif ($r.BackupSkipped) { $lines.Add('Sicherung  : übersprungen (andere Sicherung bestätigt, im Protokoll vermerkt)') }
@@ -3945,7 +4332,8 @@ function Initialize-FinishPage {
 
     $notiz = New-Object System.Collections.Generic.List[string]
     if ($plan.Mode -ne 'update') { $notiz.Add($(if ($r.ConfigNew) { 'config.php wurde erzeugt.' } else { 'Die vorhandene config.php wurde übernommen.' })) }
-    if ($plan.Mode -eq 'update') { $notiz.Add('Neue Konfigurationsschlüssel ergänzt SNAIL nicht - die Anwendung läuft mit Standardwerten weiter; Hinweise von check stehen unten ("config.php öffnen").') }
+    if ($plan.Mode -eq 'update') { $notiz.Add('Neue Konfigurationsschlüssel ergänzt SNAIL nicht (Ausnahme: app.key, app.key_previous und mail.redirect_to, falls sie fehlen) - die Anwendung läuft mit Standardwerten weiter; Hinweise von check stehen unten ("config.php öffnen").') }
+    if ($ak.Backup) { $notiz.Add('Die Kopie der vorherigen config.php ist nur für Administratoren lesbar; SNAIL löscht sie nicht automatisch.') }
     if ($r.CredFile) { $notiz.Add("Zugangsdaten liegen in $($r.CredFile) - nach dem Übertragen in den Passwortmanager löschen.") }
     if ($r.Backup) { $notiz.Add('SNAIL löscht Sicherungen nie automatisch.') }
     $txt = ($notiz -join ' ')
