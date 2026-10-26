@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.4
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.5
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -135,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.4'
+$script:AppVersion = '7.5'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -2241,16 +2241,77 @@ function Get-PgObjectState {
 }
 
 <#
+ Locale neuer Datenbanken (deutsche Volltextsuche, Sortierung, Trigramme;
+ Plan D3 der Vorlage): Sortierung ICU de-DE, LC_COLLATE 'C', LC_CTYPE eine
+ Locale mit UTF-8-Zeichenklassen - unter Linux C.UTF-8, unter Windows eine
+ Windows-Locale (dort ist ENCODING 'UTF8' mit jeder Locale erlaubt, siehe
+ PostgreSQL-Doku "Character Set Support"). Die Kandidaten werden der Reihe
+ nach versucht; eine unbekannte Locale laesst CREATE DATABASE ohne Folgen
+ scheitern.
+#>
+$script:DbIcuLocale = 'de-DE'
+
+function Get-DbCtypeCandidates {
+    param([string]$ServerVersion = '')
+    # version(): "... compiled by Visual C++ build 1938, 64-bit" (EDB/WIPP) bzw. mingw
+    if ($ServerVersion -match 'Visual C\+\+|mingw|windows') { return @('German_Germany.1252', 'de-DE') }
+    return @('C.UTF-8', 'de_DE.UTF-8', 'en_US.UTF-8')
+}
+
+function Get-CreateDatabaseSql {
+    param([Parameter(Mandatory)][string]$DbName, [Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][string]$Ctype)
+    foreach ($n in @($DbName, $Role)) { $m = Test-PgIdentifier $n; if ($m) { throw $m } }
+    if ($Ctype -notmatch '^[A-Za-z0-9_.@ -]{1,64}$') { throw "Ungueltige Locale fuer LC_CTYPE: '$Ctype'" }
+    return ("CREATE DATABASE ""{0}"" OWNER ""{1}"" ENCODING 'UTF8' TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE '{2}' LC_COLLATE 'C' LC_CTYPE '{3}';" -f $DbName, $Role, $script:DbIcuLocale, $Ctype)
+}
+
+<#
+ Locale einer Datenbank pruefen (nach dem Anlegen und bei jedem Lauf, auch
+ Update): pg_database (Provider, ICU-Locale - ab PostgreSQL 17 datlocale,
+ vorher daticulocale -, LC_CTYPE, LC_COLLATE), Probe to_tsvector('german',
+ 'Mueller Strasse' mit Umlaut/sz) = 'mull' + 'strass' und Sortierung Ae vor B.
+ Umlaute als U&-Escapes (Skript nur ASCII). Aendert nichts.
+#>
+function Get-DbLocaleState {
+    param([Parameter(Mandatory)]$Pg, [Parameter(Mandatory)][string]$Password, [Parameter(Mandatory)][string]$DbName)
+    $m = Test-PgIdentifier $DbName; if ($m) { throw $m }
+    $sql = "SELECT 'snail|' || d.datlocprovider::text || '|' || coalesce(to_jsonb(d)->>'datlocale', to_jsonb(d)->>'daticulocale', '') || '|' || d.datctype || '|' || d.datcollate || '|' || to_tsvector('german', U&'M\00FCller Stra\00DFe')::text || '|' || ((U&'\00C4pfel' COLLATE ""default"") < 'Birne')::text FROM pg_database d WHERE d.datname = current_database();"
+    $r = Invoke-Psql -Pg $Pg -Password $Password -Database $DbName -Sql $sql
+    $line = @($r.Output -split "`r?`n" | Where-Object { $_.StartsWith('snail|') }) | Select-Object -First 1
+    if (-not $line) { throw "Unerwartete Antwort von psql: $($r.Output.Trim())" }
+    return (ConvertFrom-DbLocaleLine $line)
+}
+
+# Antwortzeile von Get-DbLocaleState bewerten (eigene Funktion fuer die Tests)
+function ConvertFrom-DbLocaleLine {
+    param([Parameter(Mandatory)][string]$Line)
+    $p = $Line -split '\|'
+    $res = [pscustomobject]@{ Provider = $p[1]; IcuLocale = $p[2]; Ctype = $p[3]; Collate = $p[4]; TsVector = $p[5]; SortOk = ($p[6] -eq 'true'); Ok = $false; Problems = @(); Text = '' }
+    $probs = @()
+    if ($res.Provider -ne 'i' -or $res.IcuLocale -notmatch '^de([-_]|$)') { $probs += ("Sortierung: Provider '{0}', Locale '{1}' statt ICU {2}" -f $res.Provider, $res.IcuLocale, $script:DbIcuLocale) }
+    if (@('C', 'POSIX', '') -contains $res.Ctype) { $probs += "LC_CTYPE '$($res.Ctype)' (Trigramme mit Umlauten falsch)" }
+    if ($res.TsVector -notmatch "'mull'" -or $res.TsVector -notmatch "'strass'") { $probs += "Volltext: to_tsvector liefert $($res.TsVector) statt 'mull' 'strass'" }
+    if (-not $res.SortOk) { $probs += 'Sortierung nach Codepunkten (Ae hinter Z)' }
+    $res.Problems = $probs
+    $res.Ok = ($probs.Count -eq 0)
+    $desc = "Provider $($res.Provider), Locale '$($res.IcuLocale)', LC_CTYPE '$($res.Ctype)', LC_COLLATE '$($res.Collate)', to_tsvector $($res.TsVector)"
+    $res.Text = if ($res.Ok) { "Locale passt ($desc)." } else { "Locale passt nicht fuer die deutsche Suche: $($probs -join '; '). ($desc) Bestehende Datenbanken aendert SNAIL nicht - Umzug per Sicherung und Wiederherstellung in eine neu angelegte Datenbank (Vorlage, docs/02-datenbank.md, Backup und Serverumzug)." }
+    return $res
+}
+
+<#
  Rolle und Datenbank wie in docs/03:
    CREATE ROLE <user> LOGIN PASSWORD '...';
-   CREATE DATABASE <db> OWNER <user> ENCODING 'UTF8' TEMPLATE template0;
+   CREATE DATABASE <db> OWNER <user> ENCODING 'UTF8' TEMPLATE template0
+       LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LC_COLLATE 'C' LC_CTYPE '<Locale>';
  Wiederholbar: Rolle vorhanden -> ALTER ROLE mit dem Passwort, das in der
  config.php steht bzw. stehen wird. Datenbank vorhanden und gehoert der Rolle
  -> nichts zu tun; gehoert sie jemand anderem -> Fehler.
 #>
 function New-ProjectDatabase {
     param([Parameter(Mandatory)]$Pg, [Parameter(Mandatory)][string]$Password,
-          [Parameter(Mandatory)][string]$DbName, [Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][string]$DbPassword)
+          [Parameter(Mandatory)][string]$DbName, [Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][string]$DbPassword,
+          [string[]]$CtypeCandidates = @())
     $state = Get-PgObjectState -Pg $Pg -Password $Password -DbName $DbName -Role $Role
     $verifier = ConvertTo-ScramVerifier -Password $DbPassword
     if ($state.RoleExists) {
@@ -2265,8 +2326,21 @@ function New-ProjectDatabase {
         Write-Log "Datenbank '$DbName' vorhanden (Eigentümer $Role)." 'Ok'
     } else {
         # CREATE DATABASE darf nicht in einer Transaktion laufen - eigener Aufruf
-        Invoke-Psql -Pg $Pg -Password $Password -Sql "CREATE DATABASE ""$DbName"" OWNER ""$Role"" ENCODING 'UTF8' TEMPLATE template0;" | Out-Null
-        Write-Log "Datenbank '$DbName' angelegt (Eigentümer $Role, UTF8, template0)." 'Ok'
+        if ($CtypeCandidates.Count -eq 0) {
+            $ver = (Invoke-Psql -Pg $Pg -Password $Password -Sql 'SELECT version();').Output.Trim()
+            $CtypeCandidates = @(Get-DbCtypeCandidates -ServerVersion $ver)
+        }
+        $done = $null; $last = ''
+        foreach ($ct in $CtypeCandidates) {
+            $r = Invoke-Psql -Pg $Pg -Password $Password -Sql (Get-CreateDatabaseSql -DbName $DbName -Role $Role -Ctype $ct) -NoThrow
+            if ($r.ExitCode -eq 0) { $done = $ct; break }
+            $last = ($r.Error.Trim() -replace '\s+', ' ')
+            if ($last -notmatch 'locale') { break }
+            Write-Log "LC_CTYPE '$ct' gibt es auf diesem Server nicht - naechster Versuch."
+        }
+        # ohne ICU im Server: "ICU is not supported in this build" - steht dann in $last
+        if (-not $done) { throw ("CREATE DATABASE fehlgeschlagen (ICU {0}, LC_CTYPE versucht: {1}): {2}" -f $script:DbIcuLocale, ($CtypeCandidates -join ', '), $last) }
+        Write-Log "Datenbank '$DbName' angelegt (Eigentuemer $Role, UTF8, template0, ICU $($script:DbIcuLocale), LC_COLLATE C, LC_CTYPE $done)." 'Ok'
     }
 }
 
@@ -3329,6 +3403,7 @@ function Get-StepPlan {
         $s.Add(@{ Key = 'appkey'; Title = 'config.php: app.key nachtragen, falls er fehlt'; Fatal = $false })
     }
     $s.Add(@{ Key = 'migrate';  Title = 'php bin\console migrate'; Fatal = $true })
+    $s.Add(@{ Key = 'dblocale'; Title = 'Datenbank: Locale fuer Suche und Sortierung pruefen'; Fatal = $false })
     if ($Plan.Mode -ne 'update') {
         $s.Add(@{ Key = 'admin';  Title = 'php bin\console user:create (Administrator)'; Fatal = $true })
     }
@@ -3480,6 +3555,15 @@ function Invoke-Installation {
                                 $state = 'Warn'
                             }
                             default { Write-Log $k.Text 'Ok' }
+                        }
+                    }
+                    'dblocale' {
+                        $loc = Get-DbLocaleState -Pg $Plan.Pg -Password $Password -DbName $Plan.DbName
+                        if ($loc.Ok) { Write-Log $loc.Text 'Ok' }
+                        else {
+                            Write-Log $loc.Text 'Warn'
+                            $rows.Add(@{ Level = 'Warn'; Name = 'Datenbank-Locale'; Text = $loc.Text })
+                            $state = 'Warn'
                         }
                     }
                     'migrate' {
