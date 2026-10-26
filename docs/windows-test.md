@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.4“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.5“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.4.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.5.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -213,6 +213,22 @@ Für einen Computer-Use-Lauf auf **SRV-Test** gedacht: jeden Schritt der Reihe n
 | 12.3a | – | ℹ Modus „Neuinstallation, Version …“ nennt die Version des Projekts aus `config/projekt/app.php` (z. B. 0.12), falls werner die Datei hat, sonst die aus `config/app.php` |
 | 12.4 | „Installieren“; danach `Get-Content C:\AK\services.json` | alle Schritte ✓; Dienst `werner` mit `"name": "werner"`, `"description": "DMS"`, `"icon": "archive"`, `"tone": "primary"` |
 | 12.5 | Auswahl „werner - Muster GmbH“ → ZIP `projektvorlage-main.zip` (Aktualisieren) → „Erneut prüfen“ | ⚠ ZIP-Datei wie in 12.2 – hier **nicht** aktualisieren, „Zur Auswahl“ |
+
+## 13 Datenbank-Locale und Umlautsuche (SNAIL 7.5)
+
+`$psql` meint `& "$pg\psql.exe" -U postgres -h localhost` (Passwort aus `C:\ProgramData\WIPP\postgres-zugangsdaten.txt`). Zuerst festhalten, was der Server kann – das ist die Windows-Probe für die Entscheidung in der README:
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 13.1 | `$psql -d postgres -tAc "SELECT version()"` | enthält „Visual C++“ (SNAIL versucht dann `German_Germany.1252`, dann `de-DE`); Version 18 |
+| 13.2 | `$psql -d postgres -c "CREATE DATABASE locprobe ENCODING 'UTF8' TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LC_COLLATE 'C' LC_CTYPE 'German_Germany.1252'"`, danach `DROP DATABASE locprobe`; dasselbe mit `LC_CTYPE 'de-DE'` | beide `CREATE DATABASE` ohne Fehler (sonst Fehlermeldung wörtlich notieren – dann geht SNAIL zum nächsten Kandidaten) |
+| 13.3 | Neuinstallation Projektvorlage, Mandant `suche` / `Suche-Test` | Schritt „Datenbank: Locale fuer Suche und Sortierung pruefen“ ✓; Protokoll „Datenbank 'projekt_suche' angelegt (… ICU de-DE, LC_COLLATE C, LC_CTYPE German_Germany.1252).“ und „Locale passt (Provider i, Locale 'de-DE', LC_CTYPE 'German_Germany.1252', LC_COLLATE 'C', to_tsvector 'mull':1 'strass':2).“ |
+| 13.4 | `$psql -d projekt_suche -c "SELECT datlocprovider, datlocale, datctype, datcollate FROM pg_database WHERE datname = current_database()"` (PostgreSQL 18: `datlocale`; `daticulocale` gibt es seit 17 nicht mehr) | `i`, `de-DE`, `German_Germany.1252`, `C` |
+| 13.5 | Umlaute in einer UTF-8-Datei prüfen (die Konsole verfälscht sonst Umlaute): `Set-Content C:\probe.sql -Encoding UTF8 -Value "SELECT to_tsvector('german','Müller Straße'), 'Äpfel' < 'Birne', array_to_string(ARRAY(SELECT x FROM unnest(ARRAY['Zander','Äpfel','Birne']) x ORDER BY x), ',');"`; `$psql -d projekt_suche -tA -f C:\probe.sql` | drei Werte, durch senkrechte Striche getrennt: `'mull':1 'strass':2`, `t`, `Äpfel,Birne,Zander` (Ä bei A) |
+| 13.6 | Trigramme (falls die Vorlage `pg_trgm` schon per Migration anlegt, sonst vorher `$psql -d projekt_suche -c "CREATE EXTENSION pg_trgm"`): `Set-Content C:\probe2.sql -Encoding UTF8 -Value "SELECT show_trgm('Müller');"`; `$psql -d projekt_suche -tA -f C:\probe2.sql` | Trigramme mit `ü` erscheinen als Hex-Werte (z. B. `0x…`), dazu `"  m"`, `"er "`, `ler`, `lle`; **nicht** `"  l"`/`" ll"`/`" m "` (das wäre „m“ + „ller“ getrennt, also `LC_CTYPE 'C'`) |
+| 13.7 | `php C:\AK\projekt-suche\bin\console check` | keine Warnung zur Volltextsuche/Locale (sofern die Vorlage die Prüfung schon hat) |
+| 13.8 | Bestehende Datenbank (z. B. `projekt` aus Abschnitt 2, angelegt vor 7.5) **aktualisieren** | Schritt Locale ⚠; „Fertig“: „Locale passt nicht fuer die deutsche Suche: Sortierung: Provider 'c' … LC_CTYPE … Bestehende Datenbanken aendert SNAIL nicht - Umzug per Sicherung und Wiederherstellung …“; `$psql -d projekt -tAc "SELECT datlocprovider, datctype FROM pg_database WHERE datname = 'projekt'"` vorher und nachher **gleich** |
+| 13.9 | `Remove-Item C:\probe.sql, C:\probe2.sql` | – |
 
 ## Ergebnis festhalten
 

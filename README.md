@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.4**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.5**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -63,6 +63,7 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | `config.php` | aus `config.example.php` mit neu erzeugtem `app.key`; eine vorhandene wird **nie** überschrieben | – (bleibt) |
 | `app.key` nachtragen | Wiederholen: nur wenn `app.key` fehlt oder leer ist (siehe [app.key](#appkey)) | ebenso, nach dem neuen Programmcode |
 | `migrate` | `php bin\console migrate` | ebenso |
+| Datenbank-Locale | prüfen (siehe [Locale der Datenbank](#locale-der-datenbank)); passt sie nicht: Hinweis auf „Fertig“, nichts geändert | ebenso |
 | Administrator | `php bin\console user:create <login> "<Name>" admin [email]`, Initialpasswort wird angezeigt und abgelegt. Beim Wiederholen nur, wenn es noch **kein** Benutzerkonto gibt | – |
 | `services.json` | Dienst und Installation ergänzen/angleichen, Logo nach `C:\AK\logos\` | ebenso |
 | Windows-Aufgabe | `setup\Aufgabenplanung\aufgabe_erstellen.ps1 -ProjektPfad … -PhpExe … -Unbeaufsichtigt` (Exit 0/1/2/3), danach einmal anstoßen (`Start-ScheduledTask`), Ende abwarten (höchstens 2 Minuten), Ergebnis 0 erwartet, sonst Warnung | ebenso |
@@ -175,9 +176,24 @@ Schlüssel für Geheimnisse in der Datenbank (z. B. SMTP-Passwörter der Mailkon
 | Superuser-Passwort | `C:\ProgramData\WIPP\postgres-zugangsdaten.txt` (Format von WIPP: Wert nach dem ersten `=`, ungetrimmt); fehlt die Datei, Eingabe auf „Prüfen“ mit „Verbindung testen“ |
 | Übergabe | SQL über die **Standardeingabe** an `psql -f -`; das Superuser-Passwort steht nur in einer temporären **pgpass-Datei** (ACL nur Administratoren/SYSTEM, `PGPASSFILE` nur für den Kindprozess, sofort gelöscht). Nie auf der Kommandozeile |
 | Rolle | `CREATE ROLE <benutzer> LOGIN PASSWORD '…'` – das Passwort geht als **SCRAM-SHA-256-Hash** zum Server (wie bei WIPP). Rolle vorhanden → `ALTER ROLE … PASSWORD` mit dem Passwort der vorhandenen `config.php` (bzw. dem neuen, das gleich hineingeschrieben wird) |
-| Datenbank | `CREATE DATABASE <name> OWNER <benutzer> ENCODING 'UTF8' TEMPLATE template0`. Vorhanden mit richtigem Eigentümer → nichts zu tun; mit anderem → Fehler auf „Prüfen“ |
+| Datenbank | `CREATE DATABASE <name> OWNER <benutzer> ENCODING 'UTF8' TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LC_COLLATE 'C' LC_CTYPE '<Locale>'` (seit 7.5, siehe unten). Vorhanden mit richtigem Eigentümer → nichts zu tun; mit anderem → Fehler auf „Prüfen“ |
 | Vorhanden bei einer Neuinstallation | wird **nie stillschweigend** übernommen (siehe unten) |
 | Passwort | 24 Zeichen aus Buchstaben und Ziffern (ohne Verwechsler) |
+
+### Locale der Datenbank
+
+Seit 7.5 legt SNAIL neue Datenbanken für die deutsche Volltextsuche der Vorlage an (Plan D3, auf PostgreSQL 18 erprobt): **Sortierung ICU `de-DE`** (Ä bei A statt hinter Z), `LC_COLLATE 'C'`, **`LC_CTYPE` mit UTF-8-Zeichenklassen** (sonst zerlegen Trigramme `ü` falsch), weiter `ENCODING 'UTF8' TEMPLATE template0`.
+
+| Server | `LC_CTYPE` (der Reihe nach versucht) | Begründung |
+|---|---|---|
+| Windows (`version()` nennt „Visual C++“ oder „mingw“, z. B. WIPP/EDB) | `German_Germany.1252`, dann `de-DE` | Unter Windows ist `ENCODING 'UTF8'` mit **jeder** Locale erlaubt (PostgreSQL-Doku „Character Set Support“: „On Windows, however, UTF-8 encoding can be used with any locale“); PostgreSQL wandelt Texte für die Zeichenklassen in UTF-16 und nutzt die Windows-Funktionen, die Codepage 1252 spielt dafür keine Rolle. `German_Germany.1252` ist der klassische Name, `de-DE` der BCP-47-Name, den `initdb` seit PostgreSQL 16 unter Windows verwendet; Windows kennt beide unabhängig von der Sprache des Systems |
+| sonst (Linux) | `C.UTF-8`, dann `de_DE.UTF-8`, `en_US.UTF-8` | `C.UTF-8` gibt es in jeder glibc ab 2.35 |
+
+Eine unbekannte Locale lässt `CREATE DATABASE` ohne Folgen scheitern, dann kommt der nächste Kandidat. Fehlt ICU im Server, bricht der Schritt mit der Meldung von PostgreSQL ab.
+
+**Prüfung** (Schritt „Datenbank: Locale für Suche und Sortierung prüfen“, bei Neuinstallation, Wiederholen und Aktualisieren, nicht fatal): `datlocprovider`, ICU-Locale (`datlocale`, vor PostgreSQL 17 `daticulocale`), `datctype`, `datcollate` aus `pg_database`, dazu `to_tsvector('german', 'Müller Straße')` = `'mull':1 'strass':2` (der deutsche Stemmer kürzt „Müller“ zu `mull`) und `'Äpfel' < 'Birne'`. Auf PostgreSQL 18 ist der Volltext auch mit `C` schon richtig – Sortierung und Trigramme nicht, deshalb zählen Provider und `LC_CTYPE` mit.
+
+**Bestehende Datenbanken bleiben unverändert** (die Locale einer Datenbank lässt sich nicht ändern). Passt sie nicht, steht auf „Fertig“ ein Hinweis mit dem Weg: Sicherung und Wiederherstellung in eine neu angelegte Datenbank (Vorlage, `docs/02-datenbank.md`, „Backup & Serverumzug“). Einen Umzug macht SNAIL nicht.
 
 **Kollisionen bei einer Neuinstallation.** Datenbank- und Rollenname folgen aus dem Ordner (`-` → `_`), deshalb können zwei Ordner dieselben Namen ergeben (`olaf-muster` und `olaf_muster` → `olaf_muster` / `olaf_muster_user`), und nach einer von Hand entfernten Installation bleibt ihre Datenbank oft liegen. „Prüfen“ gleicht deshalb ab, sobald es Datenbank **oder** Rolle schon gibt bzw. eine Installation sie nutzt:
 
@@ -276,6 +292,7 @@ Unter Linux geprüft (PowerShell 7, PHP 8.5, PostgreSQL 18): Parser und PSScript
 - `services.json`: neu, angleichen, fremde Einträge/Felder/Reihenfolge, Ein-Element-Liste und BOM, Regelverstöße – und Lesen mit `ServiceDirectory::parse()` der Vorlage
 - ZIP mit einfachem und doppeltem Zwischenordner
 - Kollisionen: Namensgleichheit `olaf`/`muster` gegen `olaf_muster`, Rolle einer anderen Installation, Rest-Datenbank (Häkchen, nur Rolle, nicht lesbare Installation), Fortsetzen nach Abbruch (Zugangsdatei passend, älter, anderer Name, ohne Ordner), Ordnername `olaf` + `a-b` gegen `olaf-a` + `b`, fremde Website, fremder und verwaister App-Pool
+- Datenbank-Locale: SQL-Text von `CREATE DATABASE` (ICU, `LC_COLLATE`, `LC_CTYPE`, ungültige Werte), Kandidaten Windows/Linux, Bewertung (passend, alte Datenbank mit `C`, builtin, falscher Volltext); mit PostgreSQL 18: neue Datenbank mit `de-DE`/`C.UTF-8` und Probe, alte Datenbank → Hinweis ohne Änderung, unbekannte Locale → nächster Kandidat
 - PostgreSQL: Superuser über pgpass (Passwort mit `:` und `\`), Rolle + Datenbank anlegen und wiederholen, Anmeldung mit dem SCRAM-Hash, fremder Eigentümer, Benutzerzahl; Rest-Datenbank: Sperre ohne Häkchen, Übernahme mit (alte Daten mit neuem Passwort lesbar), Fortsetzen ohne
 - Durchlauf: Rolle/Datenbank → `config.php` → `migrate` → `user:create` (Umlaute im Namen) → `services.json` (url angleichen) → `check` mit Exit 0 (Zeile `app.key` OK, keine fehlenden Schlüssel) → Erkennung am Server über `info` → Sicherung nach `<Datenordner>\Sicherung`
 

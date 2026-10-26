@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -883,6 +883,39 @@ Test-Case 'Get-InstalledInstances: zwei Mandanten, BOM, ohne config.php / bin\co
 }
 
 # =============================================================================
+Write-Host "`n== Datenbank-Locale (SQL-Text, Bewertung)"
+Test-Case 'Get-CreateDatabaseSql: ICU de-DE, LC_COLLATE C, LC_CTYPE, UTF8, template0; ungueltige Werte abgelehnt' {
+    Assert-Equal "CREATE DATABASE ""olaf"" OWNER ""olaf_user"" ENCODING 'UTF8' TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'de-DE' LC_COLLATE 'C' LC_CTYPE 'German_Germany.1252';" (Get-CreateDatabaseSql -DbName 'olaf' -Role 'olaf_user' -Ctype 'German_Germany.1252')
+    Assert ((Get-CreateDatabaseSql -DbName 'olaf' -Role 'olaf_user' -Ctype 'C.UTF-8') -match "LC_CTYPE 'C\.UTF-8';$") 'Linux'
+    foreach ($bad in @("x'; DROP DATABASE y; --", 'a"b', '')) {
+        $threw = $false
+        try { Get-CreateDatabaseSql -DbName 'olaf' -Role 'olaf_user' -Ctype $bad | Out-Null } catch { $threw = $true }
+        Assert $threw "LC_CTYPE abgelehnt: '$bad'"
+    }
+    $threw = $false
+    try { Get-CreateDatabaseSql -DbName 'Olaf"x' -Role 'olaf_user' -Ctype 'C.UTF-8' | Out-Null } catch { $threw = $true }
+    Assert $threw 'Datenbankname geprueft'
+}
+Test-Case 'Get-DbCtypeCandidates: Windows (Visual C++/mingw) -> Windows-Locale, sonst C.UTF-8' {
+    Assert-Equal 'German_Germany.1252,de-DE' ((Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.0, compiled by Visual C++ build 1944, 64-bit') -join ',')
+    Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.0 on x86_64-w64-mingw32, compiled by gcc')[0]
+    Assert-Equal 'C.UTF-8' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc 13.3.0, 64-bit')[0]
+}
+Test-Case 'ConvertFrom-DbLocaleLine: passend (Linux, Windows), alte Datenbank, builtin, Hinweistext nur ASCII' {
+    $ok = ConvertFrom-DbLocaleLine "snail|i|de-DE|German_Germany.1252|C|'mull':1 'strass':2|true"
+    Assert $ok.Ok ($ok.Problems -join ' | ')
+    Assert ($ok.Text -match '^Locale passt') $ok.Text
+    Assert (ConvertFrom-DbLocaleLine "snail|i|de-DE|C.UTF-8|C|'mull':1 'strass':2|true").Ok 'Linux'
+    $alt = ConvertFrom-DbLocaleLine "snail|c||C|C|'mull':1 'strass':2|false"
+    Assert (-not $alt.Ok); Assert-Equal 3 $alt.Problems.Count ($alt.Problems -join ' | ')
+    $b = ConvertFrom-DbLocaleLine "snail|b|C.UTF-8|C.UTF-8|C.UTF-8|'mull':1 'strass':2|false"
+    Assert (-not $b.Ok) 'builtin: Sortierung falsch'
+    $ts = ConvertFrom-DbLocaleLine "snail|i|de-DE|C|C|'m':1 'ller':2 'strass':3|true"
+    Assert (@($ts.Problems | Where-Object { $_ -match 'Volltext' }).Count -eq 1) ($ts.Problems -join ' | ')
+    foreach ($t in @($ok.Text, $alt.Text, $ts.Text)) { Assert ($t -cmatch '^[\x20-\x7E]+$') "nur ASCII: $t" }
+}
+
+# =============================================================================
 if (-not $PgPassword) {
     Write-Host "`n== PostgreSQL: uebersprungen (ohne -PgPassword)"
 } else {
@@ -921,6 +954,39 @@ if (-not $PgPassword) {
         Assert $threw 'fremder Eigentuemer -> Fehler'
         Invoke-Psql -Pg $pg -Password $PgPassword -Sql 'DROP ROLE IF EXISTS postgres_x;' | Out-Null
         Assert-Equal -1 (Get-UserCount -Pg $pg -Password $PgPassword -DbName $db) 'ohne Tabelle users'
+    }
+    Test-Case 'Datenbank-Locale: neu mit ICU de-DE / C.UTF-8, Probe Umlaute und Sortierung; alte Datenbank (C) -> Hinweis, unveraendert' {
+        $loc = Get-DbLocaleState -Pg $pg -Password $PgPassword -DbName $db
+        Assert $loc.Ok $loc.Text
+        Assert-Equal 'i' $loc.Provider; Assert-Equal 'de-DE' $loc.IcuLocale; Assert-Equal 'C.UTF-8' $loc.Ctype; Assert-Equal 'C' $loc.Collate
+        Assert ($loc.TsVector -match "'mull':1" -and $loc.TsVector -match "'strass':2") $loc.TsVector
+        Assert $loc.SortOk 'Ae vor B'
+        # Datenbank wie vor 7.5 bzw. auf einem Cluster mit C: Hinweis, nichts geaendert
+        $old = "snailtest_${suffix}_alt"
+        try {
+            Invoke-Psql -Pg $pg -Password $PgPassword -Sql "CREATE DATABASE ""$old"" ENCODING 'UTF8' TEMPLATE template0 LOCALE 'C';" | Out-Null
+            $l2 = Get-DbLocaleState -Pg $pg -Password $PgPassword -DbName $old
+            Assert (-not $l2.Ok) 'alte Locale erkannt'
+            Assert ($l2.Text -match 'aendert SNAIL nicht' -and $l2.Text -match 'Sicherung und Wiederherstellung') $l2.Text
+            Assert (@($l2.Problems | Where-Object { $_ -match 'LC_CTYPE' }).Count -eq 1) ($l2.Problems -join ' | ')
+            Assert-Equal 'C' (Get-DbLocaleState -Pg $pg -Password $PgPassword -DbName $old).Ctype 'Pruefung aendert nichts'
+        } finally {
+            Invoke-Psql -Pg $pg -Password $PgPassword -Sql "DROP DATABASE IF EXISTS ""$old"";" -NoThrow | Out-Null
+        }
+    }
+    Test-Case 'New-ProjectDatabase: unbekannte LC_CTYPE (Windows-Name unter Linux) -> naechster Kandidat' {
+        $db3 = "snailtest_${suffix}_kand"; $role3 = "snailtest_${suffix}_kand_user"
+        try {
+            New-ProjectDatabase -Pg $pg -Password $PgPassword -DbName $db3 -Role $role3 -DbPassword (New-RandomPassword) -CtypeCandidates @('German_Germany.1252', 'C.UTF-8')
+            $l3 = Get-DbLocaleState -Pg $pg -Password $PgPassword -DbName $db3
+            Assert-Equal 'C.UTF-8' $l3.Ctype; Assert $l3.Ok $l3.Text
+            $threw = $false
+            try { New-ProjectDatabase -Pg $pg -Password $PgPassword -DbName ($db3 + 'x') -Role $role3 -DbPassword 'x' -CtypeCandidates @('Gibts_Nicht.1252') } catch { $threw = $_.Exception.Message -match 'CREATE DATABASE fehlgeschlagen' }
+            Assert $threw 'keine gueltige Locale -> Fehler'
+        } finally {
+            Invoke-Psql -Pg $pg -Password $PgPassword -Sql "DROP DATABASE IF EXISTS ""$db3"";" -NoThrow | Out-Null
+            Invoke-Psql -Pg $pg -Password $PgPassword -Sql "DROP ROLE IF EXISTS ""$role3"";" -NoThrow | Out-Null
+        }
     }
     Test-Case 'Rest-Datenbank: Pruefung verlangt Haekchen, Sperre ohne, Uebernahme mit (Daten bleiben), Fortsetzen ohne' {
         $rdb = "snailtest_${suffix}_rest"; $rrole = "snailtest_${suffix}_rest_user"
