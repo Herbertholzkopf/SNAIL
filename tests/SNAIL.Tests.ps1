@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -913,6 +913,53 @@ Test-Case 'ConvertFrom-DbLocaleLine: passend (Linux, Windows), alte Datenbank, b
     $ts = ConvertFrom-DbLocaleLine "snail|i|de-DE|C|C|'m':1 'ller':2 'strass':3|true"
     Assert (@($ts.Problems | Where-Object { $_ -match 'Volltext' }).Count -eq 1) ($ts.Problems -join ' | ')
     foreach ($t in @($ok.Text, $alt.Text, $ts.Text)) { Assert ($t -cmatch '^[\x20-\x7E]+$') "nur ASCII: $t" }
+}
+
+# =============================================================================
+Write-Host "`n== Seite Fertig: Geheimnisse maskiert (7.6)"
+function New-TestResult($Mode = 'install', $AppKey = $null, $Admin = $null) {
+    $plan = [pscustomobject]@{ Mode = $Mode; Pg = [pscustomobject]@{ Host = 'localhost'; Port = 5432 }; ProgDir = 'C:\AK\projekt'; DataDir = 'D:\AK\projekt'; Paths = $null }
+    if ($null -eq $AppKey) { $AppKey = [pscustomobject]@{ Status = 'new'; Key = 'K' * 43 + '='; Changed = @(); Backup = ''; Text = '' } }
+    if ($null -eq $Admin) { $Admin = @{ Login = 'admin'; Passwort = 'Init-Geheim-123'; Existed = $false; Count = 0 } }
+    return @{ Plan = $plan; Admin = $Admin; Db = @{ Name = 'projekt'; User = 'projekt_user'; Password = 'DB-Geheim-456'; Source = 'bei dieser Installation erzeugt' }; AppKey = $AppKey; Backup = $null; BackupSkipped = $false }
+}
+Test-Case 'Get-FinishAccess: Initialpasswort, DB-Passwort, app.key nur maskiert im Text, Werte getrennt' {
+    $a = Get-FinishAccess -Result (New-TestResult)
+    $text = $a.Lines -join "`n"
+    foreach ($v in @('Init-Geheim-123', 'DB-Geheim-456', ('K' * 43 + '='))) { Assert (-not $text.Contains($v)) "Wert im Text: $v" }
+    Assert-Equal 3 @($text | Select-String -Pattern ([regex]::Escape($script:SecretMask)) -AllMatches).Matches.Count 'drei Masken'
+    Assert-Equal 'Initialpasswort,DB-Passwort,app.key' ((@($a.Secrets) | ForEach-Object { $_.Label }) -join ',')
+    Assert-Equal 'Init-Geheim-123' $a.Secrets[0].Value; Assert-Equal 'DB-Geheim-456' $a.Secrets[1].Value; Assert-Equal ('K' * 43 + '=') $a.Secrets[2].Value
+    Assert ($text -match 'Anmeldung  : admin') 'Login sichtbar'
+    Assert ($text -match 'Datenbank  : projekt   Rolle: projekt_user') 'Datenbank sichtbar'
+}
+Test-Case 'Get-FinishAccess: Update ohne DB-Passwort, app.key vorhanden/Vorschlag, kein neuer Admin' {
+    $a = Get-FinishAccess -Result (New-TestResult -Mode 'update' -AppKey ([pscustomobject]@{ Status = 'present'; Key = ''; Backup = '' }) -Admin @{ Count = 2 })
+    Assert-Equal 0 @($a.Secrets).Count 'nichts Geheimes'
+    Assert (-not (($a.Lines -join "`n").Contains('DB-Geheim-456'))) 'DB-Passwort beim Update nicht gezeigt'
+    $m = Get-FinishAccess -Result (New-TestResult -Mode 'repeat' -AppKey ([pscustomobject]@{ Status = 'manual'; Key = 'V' * 43 + '='; Backup = 'D:\AK\projekt\Sicherung\config.php.vor-snail-1' }) -Admin @{ Count = 1 })
+    Assert-Equal 'DB-Passwort,app.key (Vorschlag)' ((@($m.Secrets) | ForEach-Object { $_.Label }) -join ',')
+    $mt = $m.Lines -join "`n"
+    Assert (-not $mt.Contains('V' * 43)) 'Vorschlag maskiert'
+    Assert ($mt -match 'NUR eintragen') 'Hinweis zum Selbsteintragen bleibt'
+    Assert ($mt -match 'vor-snail-1') 'Sicherung sichtbar'
+}
+Test-Case 'Symbole: archive/box im 24er-Raster, Katalog-Icons gezeichnet oder Buchstabe, Farbe aus tone' {
+    foreach ($n in @('archive', 'box')) {
+        Assert $script:TileIcons.ContainsKey($n) $n
+        foreach ($line in $script:TileIcons[$n]) {
+            Assert (@($line).Count -ge 4 -and @($line).Count % 2 -eq 0) "$n`: Linienzug mit Punktpaaren"
+            foreach ($c in $line) { Assert ($c -ge 0 -and $c -le 24) "$n`: $c im Raster" }
+        }
+    }
+    Assert-Equal 3 @($script:TileIcons['archive']).Count 'archive: drei Linienzuege'
+    Assert $script:TileIcons.ContainsKey($catalog.Services['werner'].Icon) 'werner-Symbol zeichenbar'
+    Assert-Equal '0,99,177' ((Get-ServiceTileColor -Tone 'primary') -join ',')
+    Assert-Equal ((Get-ServiceTileColor -Index 1) -join ',') ((Get-ServiceTileColor -Tone 'gibtsnicht' -Index 1) -join ',') 'unbekannter Ton -> Palette'
+}
+Test-Case 'Get-DbCtypeCandidates: Ausgabe von PostgreSQL 18.6 unter Windows (msvc)' {
+    Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35217, 64-bit')[0]
+    Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6, compiled by msvc-19.44.35217, 64-bit')[0] 'auch ohne windows im Text'
 }
 
 # =============================================================================

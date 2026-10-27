@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.5
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.6
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -135,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.5'
+$script:AppVersion = '7.6'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -747,7 +747,7 @@ function Read-ProjectJson {
 
 # Ersatzsymbol: farbiges Quadrat mit dem Anfangsbuchstaben
 function New-LetterIcon {
-    param([string]$Name, [int]$Index, [int]$Size = 28)
+    param([string]$Name, [int]$Index, [int]$Size = 28, [int[]]$Rgb = @())
     $palette = @(
         [System.Drawing.Color]::FromArgb(0, 99, 177),
         [System.Drawing.Color]::FromArgb(16, 124, 65),
@@ -760,7 +760,8 @@ function New-LetterIcon {
     $g   = [System.Drawing.Graphics]::FromImage($bmp)
     try {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $brush = New-Object System.Drawing.SolidBrush($palette[$Index % $palette.Count])
+        $col = if ($Rgb.Count -eq 3) { [System.Drawing.Color]::FromArgb($Rgb[0], $Rgb[1], $Rgb[2]) } else { $palette[$Index % $palette.Count] }
+        $brush = New-Object System.Drawing.SolidBrush($col)
         $g.FillRectangle($brush, 0, 0, $Size, $Size)
         $brush.Dispose()
         $letter = if ($Name.Length -gt 0) { $Name.Substring(0, 1).ToUpper() } else { '?' }
@@ -776,6 +777,64 @@ function New-LetterIcon {
 }
 
 # Logo als Bild fuer die Liste (PNG/JPG; SVG und WebP kann System.Drawing nicht)
+<#
+ Kleine Auswahl der Lucide-Symbole aus dem Designsystem, die SNAIL selbst
+ zeichnen kann (Katalog-Feld icon): je Symbol Linienzuege im 24er-Raster der
+ Lucide-Vorlage, vereinfacht (ohne Rundungen). Unbekannte Symbole -> Buchstabe.
+#>
+$script:TileIcons = @{
+    'archive' = @(
+        , @(2, 3, 22, 3, 22, 8, 2, 8, 2, 3)
+        , @(4, 8, 4, 21, 20, 21, 20, 8)
+        , @(10, 12, 14, 12)
+    )
+    'box' = @(
+        , @(12, 2, 21, 7, 21, 17, 12, 22, 3, 17, 3, 7, 12, 2)
+        , @(3.3, 7, 12, 12, 20.7, 7)
+        , @(12, 22, 12, 12)
+    )
+}
+
+# Farbe der Kachel aus dem Katalog-Feld tone (Designsystem-Toene), sonst nach Position
+function Get-ServiceTileColor {
+    param([string]$Tone = '', [int]$Index = 0)
+    $map = @{
+        primary = @(0, 99, 177); info = @(0, 130, 135); success = @(16, 124, 65); warning = @(191, 87, 0)
+        amber = @(176, 120, 0); danger = @(170, 51, 61); purple = @(122, 68, 165); muted = @(110, 110, 110); neutral = @(90, 90, 90)
+    }
+    if ($Tone -and $map.ContainsKey($Tone)) { return $map[$Tone] }
+    $palette = @(@(0, 99, 177), @(16, 124, 65), @(191, 87, 0), @(122, 68, 165), @(170, 51, 61), @(0, 130, 135))
+    return $palette[$Index % $palette.Count]
+}
+
+function New-SymbolIcon {
+    param([Parameter(Mandatory)][string]$Icon, [int[]]$Rgb, [int]$Size = 28)
+    $bmp = New-Object System.Drawing.Bitmap($Size, $Size)
+    $g   = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($Rgb[0], $Rgb[1], $Rgb[2]))
+        $g.FillRectangle($brush, 0, 0, $Size, $Size)
+        $brush.Dispose()
+        # 24er-Raster auf 70 % der Kachel, mittig
+        $scale = ($Size * 0.7) / 24
+        $off = ($Size - 24 * $scale) / 2
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, [float][math]::Max(1.5, 2 * $scale))
+        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+        foreach ($line in $script:TileIcons[$Icon]) {
+            $pts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+            for ($k = 0; $k -lt $line.Count; $k += 2) {
+                $pts.Add((New-Object System.Drawing.PointF([float]($off + $line[$k] * $scale), [float]($off + $line[$k + 1] * $scale))))
+            }
+            $g.DrawLines($pen, $pts.ToArray())
+        }
+        $pen.Dispose()
+    } finally { $g.Dispose() }
+    return $bmp
+}
+
 function Get-ServiceImage {
     param($Service, [int]$Index)
     if ($Service.Logo.Bytes -and @('png', 'jpg') -contains $Service.Logo.Ext) {
@@ -784,7 +843,11 @@ function Get-ServiceImage {
             return [System.Drawing.Image]::FromStream($ms)
         } catch { }
     }
-    return (New-LetterIcon -Name $Service.Name -Index $Index)
+    $rgb = Get-ServiceTileColor -Tone ([string]$Service.Tone) -Index $Index
+    if ($Service.Icon -and $script:TileIcons.ContainsKey([string]$Service.Icon)) {
+        try { return (New-SymbolIcon -Icon ([string]$Service.Icon) -Rgb $rgb) } catch { }
+    }
+    return (New-LetterIcon -Name $Service.Name -Index $Index -Rgb $rgb)
 }
 
 # ==============================================================================
@@ -2253,8 +2316,9 @@ $script:DbIcuLocale = 'de-DE'
 
 function Get-DbCtypeCandidates {
     param([string]$ServerVersion = '')
-    # version(): "... compiled by Visual C++ build 1938, 64-bit" (EDB/WIPP) bzw. mingw
-    if ($ServerVersion -match 'Visual C\+\+|mingw|windows') { return @('German_Germany.1252', 'de-DE') }
+    # version(): "PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44..., 64-bit"
+    # (EDB/WIPP; aeltere: "Visual C++ build 1938") bzw. mingw
+    if ($ServerVersion -match 'Visual C\+\+|msvc|mingw|windows') { return @('German_Germany.1252', 'de-DE') }
     return @('C.UTF-8', 'de_DE.UTF-8', 'en_US.UTF-8')
 }
 
@@ -4378,6 +4442,12 @@ $script:TxtAcc.BorderStyle = 'None'
 $script:TxtAcc.BackColor = $script:ColBox
 $script:TxtAcc.Font      = New-Object System.Drawing.Font('Consolas', 9.5)
 $script:PnlFinish.Controls.Add($script:TxtAcc)
+$script:PnlSecrets = New-Object System.Windows.Forms.Panel
+$script:PnlSecrets.Location = New-Object System.Drawing.Point(0, 184)
+$script:PnlSecrets.Size     = New-Object System.Drawing.Size($pw, 30)
+$script:PnlSecrets.Anchor   = 'Top,Left,Right'
+$script:PnlSecrets.Visible  = $false
+$script:PnlFinish.Controls.Add($script:PnlSecrets)
 $script:LblAccNote = New-Label $script:PnlFinish 0 184 $pw 34 '' $script:ColGray
 $script:LblResHead = New-Label $script:PnlFinish 0 220 $pw 22 'Hinweise' $script:ColDark $fontBig
 $script:LvRes = New-ResultList $script:PnlFinish 244 140 260
@@ -4409,6 +4479,112 @@ function Add-FinishButton {
     $script:FlowFinish.Controls.Add($b)
 }
 
+<#
+ Inhalt des Kastens "Zugangsdaten und Ablage" auf "Fertig". Geheimnisse
+ (Initialpasswort, DB-Passwort, app.key) stehen dort nur maskiert; ihre Werte
+ kommen getrennt in Secrets und erscheinen darunter als Zeilen mit "Anzeigen"
+ und "Kopieren" - so landen sie nicht in Bildschirmfotos. Die Zugangsdatei
+ bleibt unveraendert.
+#>
+$script:SecretMask = '********'
+
+function Get-FinishAccess {
+    param([Parameter(Mandatory)]$Result)
+    $r = $Result
+    $plan = $r.Plan
+    $mask = $script:SecretMask + '   (unten: Anzeigen / Kopieren)'
+    $secrets = New-Object System.Collections.Generic.List[object]
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($r.Admin) {
+        if ($r.Admin.Count -gt 0) { $lines.Add(("Anmeldung  : {0} Benutzerkonto(en) vorhanden - kein neuer Administrator" -f $r.Admin.Count)) }
+        else {
+            $lines.Add(("Anmeldung  : {0}" -f $r.Admin.Login))
+            if ($r.Admin.Passwort) {
+                $lines.Add(("Passwort   : {0}   (Initialpasswort - Wechsel beim ersten Login)" -f $mask))
+                $secrets.Add([pscustomobject]@{ Label = 'Initialpasswort'; Value = [string]$r.Admin.Passwort })
+            }
+            else { $lines.Add("Passwort   : unverändert (Benutzer existierte bereits; Notfall: php bin\console user:password $($r.Admin.Login))") }
+        }
+    }
+    $lines.Add(("Datenbank  : {0}   Rolle: {1}   ({2}:{3})" -f $r.Db.Name, $r.Db.User, $plan.Pg.Host, $plan.Pg.Port))
+    if ($plan.Mode -ne 'update' -and $r.Db.Password) {
+        $lines.Add(("DB-Passwort: {0}   ({1})" -f $mask, $r.Db.Source))
+        $secrets.Add([pscustomobject]@{ Label = 'DB-Passwort'; Value = [string]$r.Db.Password })
+    }
+    $ak = $r.AppKey
+    switch ($ak.Status) {
+        'new'     { $lines.Add(("app.key    : {0}   (bei dieser Installation erzeugt - mit der config.php sichern, im Passwortmanager ablegen)" -f $mask)) }
+        'added'   { $lines.Add(("app.key    : {0}   (in die vorhandene config.php nachgetragen - sichern, im Passwortmanager ablegen)" -f $mask)) }
+        'present' { $lines.Add('app.key    : vorhanden, unverändert') }
+        'invalid' { $lines.Add('app.key    : UNGÜLTIG in der config.php - nicht geändert, siehe Hinweise unten') }
+        'failed'  { $lines.Add('app.key    : vorhanden, unverändert (weitere Schlüssel nicht ergänzt, siehe Hinweise unten)') }
+        'manual'  {
+            $lines.Add('app.key    : NICHT eingetragen - automatisch ging es nicht (siehe Hinweise unten). Vorschlag zum Selbsteintragen:')
+            $lines.Add(("             {0}" -f $mask))
+            $lines.Add("             Gilt erst, wenn er in der config.php unter 'app' => [ 'key' => '...' ] steht. NUR eintragen, wenn")
+            $lines.Add('             app.key dort wirklich fehlt oder leer ist - einen vorhandenen Schlüssel nie ersetzen (Passwörter verloren).')
+        }
+    }
+    if ($ak.Key -and @('new', 'added', 'manual') -contains $ak.Status) {
+        $secrets.Add([pscustomobject]@{ Label = $(if ($ak.Status -eq 'manual') { 'app.key (Vorschlag)' } else { 'app.key' }); Value = [string]$ak.Key })
+    }
+    if ($ak.Backup) { $lines.Add(("Vorher     : {0}   (config.php vor der Änderung, enthält das DB-Passwort)" -f $ak.Backup)) }
+    $lines.Add(("Ordner     : {0}   Daten: {1}" -f $plan.ProgDir, $(if ($plan.DataDir) { $plan.DataDir } else { $plan.Paths.Data })))
+    if ($r.Backup) { $lines.Add(("Sicherung  : {0}" -f $r.Backup.Text)) }
+    elseif ($r.BackupSkipped) { $lines.Add('Sicherung  : übersprungen (andere Sicherung bestätigt, im Protokoll vermerkt)') }
+    return [pscustomobject]@{ Lines = $lines.ToArray(); Secrets = $secrets.ToArray() }
+}
+
+# Je Geheimnis eine Zeile: Name, maskiertes Feld, "Anzeigen"/"Verbergen",
+# "Kopieren" (kopiert ohne anzuzeigen). Liefert die naechste freie Hoehe.
+function Show-FinishSecrets {
+    param($Secrets = @(), [int]$Top)
+    $script:PnlSecrets.Controls.Clear()
+    $script:PnlSecrets.Top = $Top
+    $script:PnlSecrets.Visible = (@($Secrets).Count -gt 0)
+    if (-not $script:PnlSecrets.Visible) { return $Top }
+    $row = 0
+    foreach ($sec in @($Secrets)) {
+        $yy = $row * 30
+        [void](New-Label $script:PnlSecrets 0 ($yy + 5) 150 20 $sec.Label $script:ColDark)
+        $tb = New-Object System.Windows.Forms.TextBox
+        $tb.Location = New-Object System.Drawing.Point(150, ($yy + 2))
+        $tb.Size     = New-Object System.Drawing.Size(420, 24)
+        $tb.ReadOnly = $true
+        $tb.Font     = New-Object System.Drawing.Font('Consolas', 9.5)
+        # Passwortfeld: zeigt Punkte, Strg+C kopiert nichts
+        $tb.UseSystemPasswordChar = $true
+        $tb.Text     = $sec.Value
+        $script:PnlSecrets.Controls.Add($tb)
+        $show = New-Object System.Windows.Forms.Button
+        $show.Text     = 'Anzeigen'
+        $show.Location = New-Object System.Drawing.Point(580, $yy)
+        $show.Size     = New-Object System.Drawing.Size(90, 26)
+        $show.Tag      = $tb
+        $show.Add_Click({
+            $t = $this.Tag
+            $t.UseSystemPasswordChar = -not $t.UseSystemPasswordChar
+            $this.Text = if ($t.UseSystemPasswordChar) { 'Anzeigen' } else { 'Verbergen' }
+        })
+        $script:PnlSecrets.Controls.Add($show)
+        $copy = New-Object System.Windows.Forms.Button
+        $copy.Text     = 'Kopieren'
+        $copy.Location = New-Object System.Drawing.Point(676, $yy)
+        $copy.Size     = New-Object System.Drawing.Size(90, 26)
+        $copy.Tag      = [pscustomobject]@{ Value = $sec.Value; Label = $sec.Label }
+        $copy.Add_Click({
+            try {
+                [System.Windows.Forms.Clipboard]::SetText([string]$this.Tag.Value)
+                Set-Status ("{0} in die Zwischenablage kopiert." -f $this.Tag.Label)
+            } catch { Show-Warn ("Kopieren fehlgeschlagen: {0}" -f $_.Exception.Message) }
+        })
+        $script:PnlSecrets.Controls.Add($copy)
+        $row++
+    }
+    $script:PnlSecrets.Height = $row * 30
+    return ($Top + $script:PnlSecrets.Height + 4)
+}
+
 function Initialize-FinishPage {
     $r = $script:Result
     $plan = $r.Plan
@@ -4420,39 +4596,14 @@ function Initialize-FinishPage {
         $(if ($plan.Mode -eq 'update') { 'Aktualisiert' } else { 'Die Anwendung läuft' }), $r.Url, $r.Local,
         $(if ($errRows -gt 0) { " - $errRows Schritt(e) mit Fehlern, siehe unten" } elseif ($warnCount -gt 0) { ' mit Hinweisen, siehe unten' } else { '' }))
 
-    # --- Zugangsdaten (markier- und kopierbar) --------------------------------
-    $lines = New-Object System.Collections.Generic.List[string]
-    if ($r.Admin) {
-        if ($r.Admin.Count -gt 0) { $lines.Add(("Anmeldung  : {0} Benutzerkonto(en) vorhanden - kein neuer Administrator" -f $r.Admin.Count)) }
-        else {
-            $lines.Add(("Anmeldung  : {0}" -f $r.Admin.Login))
-            if ($r.Admin.Passwort) { $lines.Add(("Passwort   : {0}   (Initialpasswort - Wechsel beim ersten Login)" -f $r.Admin.Passwort)) }
-            else { $lines.Add("Passwort   : unverändert (Benutzer existierte bereits; Notfall: php bin\console user:password $($r.Admin.Login))") }
-        }
-    }
-    $lines.Add(("Datenbank  : {0}   Rolle: {1}   ({2}:{3})" -f $r.Db.Name, $r.Db.User, $plan.Pg.Host, $plan.Pg.Port))
-    if ($plan.Mode -ne 'update' -and $r.Db.Password) { $lines.Add(("DB-Passwort: {0}   ({1})" -f $r.Db.Password, $r.Db.Source)) }
+    # --- Zugangsdaten (Geheimnisse maskiert, darunter Anzeigen/Kopieren) -------
+    $acc = Get-FinishAccess -Result $r
+    $lines = $acc.Lines
     $ak = $r.AppKey
-    switch ($ak.Status) {
-        'new'     { $lines.Add(("app.key    : {0}   (bei dieser Installation erzeugt - mit der config.php sichern, im Passwortmanager ablegen)" -f $ak.Key)) }
-        'added'   { $lines.Add(("app.key    : {0}   (in die vorhandene config.php nachgetragen - sichern, im Passwortmanager ablegen)" -f $ak.Key)) }
-        'present' { $lines.Add('app.key    : vorhanden, unverändert') }
-        'invalid' { $lines.Add('app.key    : UNGÜLTIG in der config.php - nicht geändert, siehe Hinweise unten') }
-        'failed'  { $lines.Add('app.key    : vorhanden, unverändert (weitere Schlüssel nicht ergänzt, siehe Hinweise unten)') }
-        'manual'  {
-            $lines.Add('app.key    : NICHT eingetragen - automatisch ging es nicht (siehe Hinweise unten). Vorschlag zum Selbsteintragen:')
-            $lines.Add(("             {0}" -f $ak.Key))
-            $lines.Add("             Gilt erst, wenn er in der config.php unter 'app' => [ 'key' => '...' ] steht. NUR eintragen, wenn")
-            $lines.Add('             app.key dort wirklich fehlt oder leer ist - einen vorhandenen Schlüssel nie ersetzen (Passwörter verloren).')
-        }
-    }
-    if ($ak.Backup) { $lines.Add(("Vorher     : {0}   (config.php vor der Änderung, enthält das DB-Passwort)" -f $ak.Backup)) }
-    $lines.Add(("Ordner     : {0}   Daten: {1}" -f $plan.ProgDir, $(if ($plan.DataDir) { $plan.DataDir } else { $plan.Paths.Data })))
-    if ($r.Backup) { $lines.Add(("Sicherung  : {0}" -f $r.Backup.Text)) }
-    elseif ($r.BackupSkipped) { $lines.Add('Sicherung  : übersprungen (andere Sicherung bestätigt, im Protokoll vermerkt)') }
     $script:TxtAcc.Text = ($lines -join "`r`n")
     $script:TxtAcc.Height = ($lines.Count * 17) + 8
     $y = $script:TxtAcc.Top + $script:TxtAcc.Height + 4
+    $y = Show-FinishSecrets -Secrets $acc.Secrets -Top $y
 
     $notiz = New-Object System.Collections.Generic.List[string]
     if ($plan.Mode -ne 'update') { $notiz.Add($(if ($r.ConfigNew) { 'config.php wurde erzeugt.' } else { 'Die vorhandene config.php wurde übernommen.' })) }

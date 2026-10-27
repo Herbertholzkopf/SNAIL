@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.5**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.6**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -23,7 +23,7 @@ Es gibt keine zusätzliche Zustandsdatei: Wird der Katalog ausgetauscht, erkennt
 2. **Angaben** (nur Neuinstallation) – siehe [Eingabeseite](#eingabeseite).
 3. **Prüfen** – bevor irgendetwas geändert wird: Administrator, IIS/appcmd, URL Rewrite, WebDAV (Warnung), Windows-Firewall aktiv (Warnung), PHP-Version und -Module nach `requirements` der Vorlage, Python (falls `braucht`), psql, PostgreSQL erreichbar und Superuser-Anmeldung, Programmcode nach Vorlage aufgebaut, ZIP passt zum Katalog-Eintrag (Warnung, siehe unten), Port frei, Datenpfade, Datenbank, `services.json`, Mandanten-Schlüssel, Logo. Eingaben: ZIP-Datei oder vorhandener Programmordner, beim Aktualisieren die Sicherung, Superuser-Passwort (mit „Verbindung testen“).
 4. **Installation** – Schrittliste mit Live-Status und Protokoll daneben. Jeder Schritt ist wiederholbar; „Erneut versuchen“ macht dort weiter, wo es geklemmt hat.
-5. **Fertig** – Zugangsdaten zum Kopieren (auch `app.key`, wenn SNAIL ihn erzeugt oder nachgetragen hat), Sicherung (Ort, Größe), Hinweise von `php bin\console check`, Ergebnis von `tools\windows-pruefung.ps1`; Schaltflächen: Anwendung öffnen, lokal öffnen, `config.php` öffnen, Prüfbericht, Zugangsdaten-Datei, zurück zur Auswahl.
+5. **Fertig** – Zugangsdaten; Initialpasswort, DB-Passwort und `app.key` (wenn SNAIL ihn erzeugt oder nachgetragen hat) nur **maskiert** (`********`), je Wert „Anzeigen“/„Verbergen“ und „Kopieren“ (kopiert in die Zwischenablage, ohne anzuzeigen; seit 7.6, damit sie nicht in Bildschirmfotos landen – die Zugangsdatei bleibt unverändert), Sicherung (Ort, Größe), Hinweise von `php bin\console check`, Ergebnis von `tools\windows-pruefung.ps1`; Schaltflächen: Anwendung öffnen, lokal öffnen, `config.php` öffnen, Prüfbericht, Zugangsdaten-Datei, zurück zur Auswahl.
 
 | Auswahl | Programmcode | Modus |
 |---|---|---|
@@ -134,7 +134,7 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 |---|---|---|
 | `key` | ja | `app.service` und Schlüssel in der `services.json`: `a-z`, `0-9`, `_`, `-`, erstes Zeichen Buchstabe oder Ziffer, max. 64 |
 | `name` | ja | Anzeigename, `app.name` (ohne Mandant), `mail.from_name` |
-| `icon`, `tone`, `description` | – | für die `services.json` (Icon aus dem Designsystem; `tone`: `info`, `success`, `warning`, `danger`, `primary`, `purple`, `amber`, `muted`, `neutral`) |
+| `icon`, `tone`, `description` | – | für die `services.json` (Icon aus dem Designsystem – SNAIL zeichnet in seinen Listen `archive` und `box` selbst, andere als Buchstabenkachel in der Farbe von `tone`; `tone`: `info`, `success`, `warning`, `danger`, `primary`, `purple`, `amber`, `muted`, `neutral`) |
 | `logo` | – | Bilddatei neben der `projekte.json` (z. B. `logos/olaf.svg`), wird mit SNAIL ausgeliefert; svg, png, webp, jpg, höchstens 1 MB, Format am Inhalt erkannt (Base64 geht auch). SNAIL kopiert es nach `C:\AK\logos\<dienst>.<ext>` |
 | `zip` | – | vorgeschlagene ZIP-Datei (relativ zur `projekte.json`); auf „Prüfen“ per Dateidialog änderbar |
 | `uploadsMaxMb` | – | Vorschlag für die Upload-Grenze (1–4000, Standard 25) |
