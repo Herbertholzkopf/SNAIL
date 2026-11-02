@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.6
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.7
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -135,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.6'
+$script:AppVersion = '7.7'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -926,7 +926,7 @@ function Set-ConfigTemplateValues {
  python.exe gehoert zu den optionalen Schluesseln: Er wird nur gesetzt, wenn
  die config.example.php des Projekts ihn enthaelt.
 #>
-$script:OptionalConfigKeys = @('python.exe', 'app.key')
+$script:OptionalConfigKeys = @('python.exe', 'app.key', 'uploads.audio_max_mb')
 
 function Get-ConfigValues {
     param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '')
@@ -967,6 +967,8 @@ function Get-ConfigValues {
     }
     if ($Plan.PythonExe) { $v['python.exe'] = $Plan.PythonExe }
     if ($AppKey) { $v['app.key'] = $AppKey }
+    # Audio-Grenze (D5): nur wenn die config.example.php den Schluessel kennt
+    if ($null -ne $Plan.TemplateAudioMaxMb) { $v['uploads.audio_max_mb'] = [int]$Plan.TemplateAudioMaxMb }
     return $v
 }
 
@@ -1180,7 +1182,8 @@ $script:PhpConfigState = $script:PhpConfigHelpers + @'
 $c = require $argv[1]; $e = require $argv[2];
 if (!is_array($c) || !is_array($e)) { echo json_encode(['error' => 'kein Array']); exit(1); }
 $o = ['keys' => [], 'version' => (is_int($c['CONFIG_VERSION'] ?? null) ? $c['CONFIG_VERSION'] : null), 'example_version' => (is_int($e['CONFIG_VERSION'] ?? null) ? $e['CONFIG_VERSION'] : null), 'missing' => array_values(array_diff(snail_keys($e), snail_keys($c)))];
-foreach (['app.key', 'app.key_previous', 'mail.redirect_to'] as $k) { [$f, $v] = snail_has($c, $k); [$fe] = snail_has($e, $k); if (!$f) { $s = 'missing'; } elseif ($v === null || $v === '') { $s = 'empty'; } elseif ($k !== 'app.key') { $s = 'set'; } else { $t = is_string($v) ? trim($v) : ''; $r = strlen($t) === 44 ? base64_decode($t, true) : false; $s = ($r !== false && strlen($r) === 32) ? 'valid' : 'invalid'; } $o['keys'][$k] = ['state' => $s, 'example' => $fe]; }
+foreach (['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb'] as $k) { [$f, $v] = snail_has($c, $k); [$fe] = snail_has($e, $k); if (!$f) { $s = 'missing'; } elseif ($v === null || $v === '') { $s = 'empty'; } elseif ($k !== 'app.key') { $s = 'set'; } else { $t = is_string($v) ? trim($v) : ''; $r = strlen($t) === 44 ? base64_decode($t, true) : false; $s = ($r !== false && strlen($r) === 32) ? 'valid' : 'invalid'; } $o['keys'][$k] = ['state' => $s, 'example' => $fe]; }
+$o['audio_example'] = (is_int($e['uploads']['audio_max_mb'] ?? null) && $e['uploads']['audio_max_mb'] > 0) ? $e['uploads']['audio_max_mb'] : null;
 echo json_encode($o);
 '@
 
@@ -1243,6 +1246,7 @@ function Backup-ConfigFile {
  Status: none (Vorlage ohne app.key) | present | invalid | added | manual | failed
 #>
 $script:ConfigV4Keys = @('app.key_previous', 'mail.redirect_to')
+$script:AudioMaxMbDefault = 300
 
 function Update-InstalledConfigKeys {
     param([Parameter(Mandatory)]$Plan)
@@ -1266,11 +1270,18 @@ function Update-InstalledConfigKeys {
     foreach ($k in $script:ConfigV4Keys) {
         if ($st.keys.$k.example -and [string]$st.keys.$k.state -eq 'missing') { $values[$k] = '' }
     }
+    # uploads.audio_max_mb (CONFIG_VERSION 6, D5): nur wenn er fehlt; ein
+    # vorhandener Wert bleibt. Wert aus der config.example.php, sonst 300.
+    if ($st.keys.'uploads.audio_max_mb'.example -and [string]$st.keys.'uploads.audio_max_mb'.state -eq 'missing') {
+        $values['uploads.audio_max_mb'] = $(if ($st.audio_example) { [int]$st.audio_example } else { $script:AudioMaxMbDefault })
+    }
     $allowed = @{}
+    # CONFIG_VERSION eine Stufe hoeher (3 -> 4, 5 -> 6), nur wenn danach kein
+    # Schluessel der Vorlage mehr fehlt
     $rest = @($st.missing | Where-Object { -not $values.Contains([string]$_) })
-    if ($values.Count -gt 0 -and $st.version -eq 3 -and $st.example_version -eq 4 -and $rest.Count -eq 0) {
-        $values['CONFIG_VERSION'] = 4
-        $allowed['CONFIG_VERSION'] = @('3')
+    if ($values.Count -gt 0 -and $null -ne $st.version -and $null -ne $st.example_version -and $st.version -eq ($st.example_version - 1) -and $rest.Count -eq 0) {
+        $values['CONFIG_VERSION'] = [int]$st.example_version
+        $allowed['CONFIG_VERSION'] = @([string]$st.version)
     }
     if ($values.Count -eq 0) {
         $res.Status = 'present'
@@ -1667,6 +1678,53 @@ function Test-WebDavInstalled {
     return (Test-Path -LiteralPath (Join-Path $env:windir 'system32\inetsrv\webdav.dll'))
 }
 
+<#
+ Upload-Grenze der Website (requestLimits.maxAllowedContentLength, Bytes).
+ Ohne Audio-Grenze (Vorlage vor CONFIG_VERSION 6) wie bisher: uploads.max_mb
+ + 1 MB fuer den Rahmen einer multipart-Anfrage. Mit uploads.audio_max_mb (D5):
+ max(max_mb, audio_max_mb) * 1 MiB + 10 MiB (300 MB -> 325 058 560).
+#>
+function Get-UploadLimitBytes {
+    param([Parameter(Mandatory)][int]$MaxMb, $AudioMaxMb = $null)
+    if ($null -eq $AudioMaxMb) { return [long](($MaxMb + 1) * 1048576) }
+    return ([long][math]::Max($MaxMb, [int]$AudioMaxMb) * 1048576 + 10485760)
+}
+
+<#
+ Audio-Grenze einer Installation in MB oder $null (Rueckfall: die Vorlage
+ kennt uploads.audio_max_mb nicht). Kennt sie ihn, gilt der Wert der
+ vorhandenen config.php, sonst der aus info, sonst der der config.example.php
+ (den SNAIL bei Neuinstallation bzw. Nachtragen schreibt).
+#>
+function Get-PlanAudioMaxMb {
+    param([Parameter(Mandatory)]$Plan)
+    if ($null -eq $Plan.TemplateAudioMaxMb) { return $null }
+    $cfg = $Plan.ExistingConfig
+    if ($cfg -and $cfg.uploads -and $null -ne $cfg.uploads.audio_max_mb) {
+        $n = 0
+        if ([int]::TryParse([string]$cfg.uploads.audio_max_mb, [ref]$n) -and $n -gt 0) { return $n }
+    }
+    if ($Plan.Inst -and $Plan.Inst.Instance -and $null -ne $Plan.Inst.Instance.UploadsAudioMaxMb) { return [int]$Plan.Inst.Instance.UploadsAudioMaxMb }
+    return [int]$Plan.TemplateAudioMaxMb
+}
+
+# uploads.audio_max_mb der config.example.php (MB) oder $null, wenn der Schluessel
+# fehlt; ein ungueltiger Wert ergibt den Standard 300
+function Get-ExampleAudioMaxMb {
+    param([Parameter(Mandatory)][string]$ExampleFile, [string]$PhpExe)
+    if (-not (Test-Path -LiteralPath $ExampleFile)) { return $null }
+    if (-not (Test-ConfigTemplateKey -ExampleFile $ExampleFile -Key 'uploads.audio_max_mb')) { return $null }
+    if ($PhpExe) {
+        try {
+            $code = '$c = require $argv[1]; $v = is_array($c) ? ($c["uploads"]["audio_max_mb"] ?? null) : null; echo json_encode(["v" => (is_int($v) && $v > 0) ? $v : null]);'
+            $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @('-r', $code, $ExampleFile)) -Utf8Output -TimeoutSec 60
+            $pos = $r.Output.IndexOf('{')
+            if ($r.ExitCode -eq 0 -and $pos -ge 0) { $j = $r.Output.Substring($pos) | ConvertFrom-Json; if ($null -ne $j.v) { return [int]$j.v } }
+        } catch { }
+    }
+    return $script:AudioMaxMbDefault
+}
+
 # Gueltiger Wert von maxAllowedContentLength fuer eine Website (Bytes, -1 = unbekannt)
 function Get-IisUploadLimit {
     param([Parameter(Mandatory)][string]$Site)
@@ -1809,15 +1867,15 @@ function Set-ProjectSite {
     if ($r.ExitCode -ne 0) { throw "Anonyme Anmeldung konnte nicht auf den App-Pool-Benutzer gestellt werden: $($r.Output)" }
     Write-Log "Anonyme Anfragen laufen als IIS AppPool\$name." 'Ok'
 
-    # +1 MB fuer den Rahmen einer multipart-Anfrage: eine Datei von genau
-    # uploads.max_mb soll noch bis zur Anwendung kommen
-    $want = [long](($Plan.Inst.UploadsMaxMb + 1) * 1048576)
+    $audio = Get-PlanAudioMaxMb -Plan $Plan
+    $want = Get-UploadLimitBytes -MaxMb $Plan.Inst.UploadsMaxMb -AudioMaxMb $audio
     $have = Get-IisUploadLimit -Site $name
     $bytes = [long][math]::Max($want, $have)
     $r = Invoke-AppCmd @('set', 'config', $name, '-section:system.webServer/security/requestFiltering',
         "/requestLimits.maxAllowedContentLength:$bytes", '/commit:apphost')
     if ($r.ExitCode -ne 0) { throw "Upload-Grenze konnte nicht gesetzt werden: $($r.Output)" }
-    Write-Log ("Upload-Grenze der Website: {0} Bytes ({1} MB, uploads.max_mb = {2})" -f $bytes, [math]::Floor($bytes / 1MB), $Plan.Inst.UploadsMaxMb) 'Ok'
+    Write-Log ("Upload-Grenze der Website: {0} Bytes ({1} MB, uploads.max_mb = {2}{3}{4})" -f $bytes, [math]::Floor($bytes / 1MB), $Plan.Inst.UploadsMaxMb,
+        $(if ($null -ne $audio) { ", uploads.audio_max_mb = $audio" } else { '' }), $(if ($have -gt $want) { ', hoeherer Wert der Website bleibt' } else { '' })) 'Ok'
 
     Start-ProjectPool -Name $name
     $r = Invoke-AppCmd @('start', 'site', "/site.name:$name")
@@ -2864,7 +2922,7 @@ function Get-InstalledInstances {
         if (-not (Test-Path -LiteralPath (Join-Path $d.FullName 'config.php')) -or -not (Test-Path -LiteralPath $console)) { continue }
         $inst = [pscustomobject]@{
             Ordner = $d.Name; ProgDir = $d.FullName; ServiceKey = ''; Key = ''; Name = ''; Url = ''; AppName = ''; Version = ''
-            Port = 0; Bindings = ''; Paths = $null; Db = $null; UploadsMaxMb = 25; Service = $null; InServicesJson = $false
+            Port = 0; Bindings = ''; Paths = $null; Db = $null; UploadsMaxMb = 25; UploadsAudioMaxMb = $null; Service = $null; InServicesJson = $false
             ServicesUrl = ''; Error = ''; Display = $d.Name
         }
         try {
@@ -2883,6 +2941,7 @@ function Get-InstalledInstances {
                 Temp = [string]$j.paths.temp; ServicesJson = [string]$j.paths.services_json
             }
             if ($null -ne $j.uploads_max_mb) { $inst.UploadsMaxMb = [int]$j.uploads_max_mb }
+            if ($null -ne $j.uploads_audio_max_mb) { $inst.UploadsAudioMaxMb = [int]$j.uploads_audio_max_mb }
             $db = $j.db
             if ($null -eq $db) { $db = (Read-InstalledConfig -ProgDir $d.FullName -PhpExe $PhpExe).db }
             $inst.Db = [pscustomobject]@{ Host = [string]$db.host; Port = [int]$db.port; Name = [string]$db.name; User = [string]$db.user }
@@ -3173,7 +3232,7 @@ function Test-Installation {
         Inst = $inst; Kind = $inst.Kind; Mode = $(if ($isNew) { 'install' } else { 'repeat' }); Ordner = $inst.Ordner; ProgRoot = $progRoot
         ProgDir = (Join-Path $progRoot $inst.Ordner); DataDir = $inst.DataDir; Paths = $inst.Paths; AclDataDirs = @()
         ServicesJson = $sj; Source = $null; PhpExe = $null; Pg = $null; DbName = $inst.DbName; DbUser = $inst.DbUser
-        ExistingConfig = $null; Template = $null; InstalledVersion = ''; SkipBackup = $false; PythonExe = $null; BackupInfo = $null
+        ExistingConfig = $null; Template = $null; TemplateAudioMaxMb = $null; InstalledVersion = ''; SkipBackup = $false; PythonExe = $null; BackupInfo = $null
         DbResume = $false; DbAdoptNeeded = $false; DbAdoptText = ''; AdoptDb = $false
     }
     if (-not $isNew) { $plan.ProgDir = $inst.Instance.ProgDir }
@@ -3281,6 +3340,15 @@ function Test-Installation {
     } else {
         $plan.Template = Get-TemplateInfo -Root $plan.ProgDir -PhpExe $null
     }
+    $exRoot = if ($srcRoot) { $srcRoot } else { $plan.ProgDir }
+    $plan.TemplateAudioMaxMb = Get-ExampleAudioMaxMb -ExampleFile ([System.IO.Path]::Combine($exRoot, 'config.example.php')) -PhpExe $php
+    $audioMb = Get-PlanAudioMaxMb -Plan $plan
+    $limit = Get-UploadLimitBytes -MaxMb $inst.UploadsMaxMb -AudioMaxMb $audioMb
+    if ($null -ne $audioMb) {
+        & $add 'Info' 'Upload-Grenze' ("uploads.max_mb {0} MB, uploads.audio_max_mb {1} MB -> IIS maxAllowedContentLength {2} Bytes (ein hoeherer Wert der Website bleibt)" -f $inst.UploadsMaxMb, $audioMb, $limit)
+    } else {
+        & $add 'Info' 'Upload-Grenze' ("uploads.max_mb {0} MB -> IIS maxAllowedContentLength {1} Bytes (Vorlage ohne uploads.audio_max_mb)" -f $inst.UploadsMaxMb, $limit)
+    }
     if (-not $isNew) {
         $plan.InstalledVersion = $inst.Instance.Version
         if ($UseZip) {
@@ -3316,8 +3384,9 @@ function Test-Installation {
             else { & $add 'Error' 'PHP-Module' ("fehlen: {0} - in der php.ini aktivieren und IIS neu starten." -f ($missing -join ', ')) }
             if ($pi.Modules -notcontains 'gd') { & $add 'Warn' 'PHP-Module' 'gd fehlt - keine Vorschaubilder.' }
             $up = ConvertTo-Megabytes $pi.Upload; $post = ConvertTo-Megabytes $pi.Post
-            if (($up -ge 0 -and $up -lt $inst.UploadsMaxMb) -or ($post -ge 0 -and $post -lt $inst.UploadsMaxMb)) {
-                & $add 'Warn' 'Upload' ("php.ini: upload_max_filesize {0}, post_max_size {1} - kleiner als die Upload-Grenze ({2} MB)." -f $pi.Upload, $pi.Post, $inst.UploadsMaxMb)
+            $maxUp = if ($null -ne $audioMb) { [math]::Max($inst.UploadsMaxMb, $audioMb) } else { $inst.UploadsMaxMb }
+            if (($up -ge 0 -and $up -lt $maxUp) -or ($post -ge 0 -and $post -lt $maxUp)) {
+                & $add 'Warn' 'Upload' ("php.ini: upload_max_filesize {0}, post_max_size {1} - kleiner als die Upload-Grenze ({2} MB)." -f $pi.Upload, $pi.Post, $maxUp)
             }
         } catch {
             & $add 'Error' 'php.exe' "$php konnte nicht ausgeführt werden: $($_.Exception.Message)"

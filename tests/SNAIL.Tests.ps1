@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -644,6 +644,99 @@ Test-Case 'Zugangsdatei: app_key mit Hinweis' {
     $f = Save-InstallCredentials -Plan $plan -Values @{ app_key = $k }
     Assert-Equal $k (Read-KeyValueFile $f)['app_key']
     Assert (([System.IO.File]::ReadAllText($f)) -match 'Passwortmanager ablegen - ohne ihn sind gespeicherte Passwoerter verloren') 'Hinweis'
+}
+
+# =============================================================================
+Write-Host "`n== Audio-Grenze uploads.audio_max_mb (D5, CONFIG_VERSION 6)"
+# Stand 5 (ohne Audio) und 6 (mit), gebaut aus der aktuellen config.example.php
+$exampleV5 = ((($example -split "`n") | Where-Object { $_ -notmatch "^\s*'audio_max_mb' =>" }) -join "`n") -replace "'CONFIG_VERSION' => \d+,", "'CONFIG_VERSION' => 5,"
+$exampleV6 = ($exampleV5 -replace "'CONFIG_VERSION' => 5,", "'CONFIG_VERSION' => 6,") -replace "(?m)^(\s*)'max_mb' => (\d+),", "`$1'max_mb' => `$2,`n`$1// Grenze fuer Audiodateien (Transkription)`n`$1'audio_max_mb' => 300,"
+function New-AudioInstall([string]$Name, [string]$Then = $exampleV5, [string]$Now = $exampleV6) {
+    $prog = Join-Path $tmp "audio/$Name"
+    New-Item -ItemType Directory -Path $prog -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $prog 'config.example.php'), $Then)
+    $in = (New-InstanceInput -Service $svc -Values (New-TestValues)).Inst
+    $plan = New-TestPlan $prog (Join-Path $tmp "audiodaten/$Name") $in
+    $plan.DbName = 'projekt'; $plan.DbUser = 'projekt_user'; $plan.Mode = 'update'; $plan.Kind = 'installed'
+    Write-ProjectConfig -Plan $plan -DbPassword 'GEHEIM-db-123' -AppKey (New-AppKey) | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $prog 'config.example.php'), $Now)
+    return $plan
+}
+Test-Case 'Get-UploadLimitBytes: ohne Audio wie bisher, mit Audio max * 1 MiB + 10 MiB' {
+    Assert-Equal ([long](26 * 1048576)) (Get-UploadLimitBytes -MaxMb 25) 'Rueckfall +1 MB'
+    Assert-Equal ([long]325058560) (Get-UploadLimitBytes -MaxMb 25 -AudioMaxMb 300) '300 MB'
+    Assert-Equal ([long](500 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 500 -AudioMaxMb 300) 'max_mb groesser'
+    Assert-Equal ([long](250 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 250 -AudioMaxMb 100)
+}
+Test-Case 'Get-ExampleAudioMaxMb: fehlt -> $null, Wert aus der Vorlage, ungueltig -> 300' {
+    $d = Join-Path $tmp 'audio/ex'; New-Item -ItemType Directory -Path $d -Force | Out-Null
+    $f = Join-Path $d 'config.example.php'
+    [System.IO.File]::WriteAllText($f, $exampleV5); Assert ($null -eq (Get-ExampleAudioMaxMb -ExampleFile $f -PhpExe $PhpExe)) 'Stand 5: Rueckfall'
+    [System.IO.File]::WriteAllText($f, $exampleV6); Assert-Equal 300 (Get-ExampleAudioMaxMb -ExampleFile $f -PhpExe $PhpExe)
+    [System.IO.File]::WriteAllText($f, ($exampleV6 -replace "'audio_max_mb' => 300,", "'audio_max_mb' => 450,")); Assert-Equal 450 (Get-ExampleAudioMaxMb -ExampleFile $f -PhpExe $PhpExe)
+    [System.IO.File]::WriteAllText($f, ($exampleV6 -replace "'audio_max_mb' => 300,", "'audio_max_mb' => '',")); Assert-Equal 300 (Get-ExampleAudioMaxMb -ExampleFile $f -PhpExe $PhpExe) 'ungueltig -> Standard'
+    Assert ($null -eq (Get-ExampleAudioMaxMb -ExampleFile (Join-Path $d 'fehlt.php') -PhpExe $PhpExe)) 'ohne Datei'
+}
+Test-Case 'Get-PlanAudioMaxMb: Rueckfall ohne Vorlagen-Schluessel, sonst config.php vor info vor Vorlage' {
+    $p = [pscustomobject]@{ TemplateAudioMaxMb = $null; ExistingConfig = [pscustomobject]@{ uploads = [pscustomobject]@{ audio_max_mb = 120 } }; Inst = $null }
+    Assert ($null -eq (Get-PlanAudioMaxMb -Plan $p)) 'Vorlage ohne Schluessel: wie bisher, auch wenn die config.php ihn hat'
+    $p.TemplateAudioMaxMb = 300
+    Assert-Equal 120 (Get-PlanAudioMaxMb -Plan $p) 'Wert der config.php'
+    $p.ExistingConfig = [pscustomobject]@{ uploads = [pscustomobject]@{ max_mb = 25 } }
+    $p.Inst = [pscustomobject]@{ Instance = [pscustomobject]@{ UploadsAudioMaxMb = 200 } }
+    Assert-Equal 200 (Get-PlanAudioMaxMb -Plan $p) 'aus info'
+    $p.Inst = [pscustomobject]@{ Instance = [pscustomobject]@{ UploadsAudioMaxMb = $null } }
+    Assert-Equal 300 (Get-PlanAudioMaxMb -Plan $p) 'Wert, den SNAIL schreibt'
+}
+Test-Case 'Neuinstallation: Write-ProjectConfig schreibt uploads.audio_max_mb nur mit Vorlage 6' {
+    $prog = Join-Path $tmp 'audio/neu'; New-Item -ItemType Directory -Path $prog -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $prog 'config.example.php'), ($exampleV6 -replace "'audio_max_mb' => 300,", "'audio_max_mb' => 450,"))
+    $plan = New-TestPlan $prog (Join-Path $tmp 'audiodaten/neu') (New-InstanceInput -Service $svc -Values (New-TestValues)).Inst
+    $plan | Add-Member -NotePropertyName TemplateAudioMaxMb -NotePropertyValue (Get-ExampleAudioMaxMb -ExampleFile (Join-Path $prog 'config.example.php') -PhpExe $PhpExe)
+    $plan.DbName = 'projekt'; $plan.DbUser = 'projekt_user'
+    Write-ProjectConfig -Plan $plan -DbPassword 'x' -AppKey (New-AppKey) | Out-Null
+    $c = Get-ConfigJson $plan
+    Assert-Equal 450 $c.uploads.audio_max_mb 'Wert der Vorlage'
+    Assert-Equal 6 $c.CONFIG_VERSION
+    Assert-Equal 'present' (Update-InstalledConfigKeys -Plan $plan).Status 'danach nichts nachzutragen'
+}
+Test-Case 'Update 5 -> 6: uploads.audio_max_mb ergaenzt (300), CONFIG_VERSION 6, Sicherung, andere Werte gleich, zweiter Lauf aendert nichts' {
+    $plan = New-AudioInstall 'update'
+    $file = Join-Path $plan.ProgDir 'config.php'
+    $before = Get-ConfigJson $plan
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'present' $r.Status $r.Text
+    Assert-Equal 'uploads.audio_max_mb,CONFIG_VERSION' ($r.Changed -join ',')
+    Assert ($r.Text -notmatch 'GEHEIM') 'keine Werte in der Meldung'
+    $after = Get-ConfigJson $plan
+    Assert-Equal 300 $after.uploads.audio_max_mb; Assert-Equal 6 $after.CONFIG_VERSION
+    Assert-Equal 1 (Get-Backups $plan).Count 'Sicherung'
+    foreach ($o in @($before, $after)) { $o.uploads.PSObject.Properties.Remove('audio_max_mb'); $o.PSObject.Properties.Remove('CONFIG_VERSION') }
+    Assert-Equal ($before | ConvertTo-Json -Depth 5 -Compress) ($after | ConvertTo-Json -Depth 5 -Compress) 'alle anderen Werte gleich'
+    $cmp = Invoke-Php 'require $argv[1]; [$c] = App\Support\Config::tryLoad($argv[2]); echo json_encode(App\Support\Config::comparisonMessages($c, $argv[3]));' @((Join-Path $Vorlage 'src/Support/Config.php'), $file, (Join-Path $plan.ProgDir 'config.example.php'))
+    Assert-Equal '[]' $cmp.Trim() "Abgleich mit der Vorlage: $cmp"
+    $bytes = [System.IO.File]::ReadAllBytes($file)
+    $r2 = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 0 @($r2.Changed).Count 'zweiter Lauf'
+    Assert-Equal ([Convert]::ToBase64String($bytes)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file))) 'Bytes gleich'
+    Assert-Equal 1 (Get-Backups $plan).Count 'keine weitere Sicherung'
+}
+Test-Case 'Update: vorhandener Wert bleibt; Wert aus der Vorlage; Rueckfall Vorlage 5 aendert nichts' {
+    $plan = New-AudioInstall 'behalten'
+    $file = Join-Path $plan.ProgDir 'config.php'
+    [System.IO.File]::WriteAllText($file, ([System.IO.File]::ReadAllText($file) -replace "(?m)^(\s*)'max_mb' => (\d+),", "`$1'max_mb' => `$2,`n`$1'audio_max_mb' => 120,"))
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 120 (Get-ConfigJson $plan).uploads.audio_max_mb 'vorhandener Wert bleibt'
+    Assert (@($r.Changed) -notcontains 'uploads.audio_max_mb') ($r.Changed -join ',')
+    $plan2 = New-AudioInstall 'vorlage450' $exampleV5 ($exampleV6 -replace "'audio_max_mb' => 300,", "'audio_max_mb' => 450,")
+    Update-InstalledConfigKeys -Plan $plan2 | Out-Null
+    Assert-Equal 450 (Get-ConfigJson $plan2).uploads.audio_max_mb 'Wert der neuen Vorlage'
+    $plan3 = New-AudioInstall 'rueckfall' $exampleV5 $exampleV5
+    $b3 = [System.IO.File]::ReadAllBytes((Join-Path $plan3.ProgDir 'config.php'))
+    $r3 = Update-InstalledConfigKeys -Plan $plan3
+    Assert-Equal 0 @($r3.Changed).Count 'Vorlage 5: nichts ergaenzt'
+    Assert-Equal ([Convert]::ToBase64String($b3)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Join-Path $plan3.ProgDir 'config.php')))) 'unveraendert'
+    Assert ($null -eq (Get-ConfigJson $plan3).uploads.audio_max_mb)
 }
 
 # =============================================================================
