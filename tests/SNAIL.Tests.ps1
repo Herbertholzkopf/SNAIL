@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -1014,7 +1014,7 @@ function New-TestResult($Mode = 'install', $AppKey = $null, $Admin = $null) {
     $plan = [pscustomobject]@{ Mode = $Mode; Pg = [pscustomobject]@{ Host = 'localhost'; Port = 5432 }; ProgDir = 'C:\AK\projekt'; DataDir = 'D:\AK\projekt'; Paths = $null }
     if ($null -eq $AppKey) { $AppKey = [pscustomobject]@{ Status = 'new'; Key = 'K' * 43 + '='; Changed = @(); Backup = ''; Text = '' } }
     if ($null -eq $Admin) { $Admin = @{ Login = 'admin'; Passwort = 'Init-Geheim-123'; Existed = $false; Count = 0 } }
-    return @{ Plan = $plan; Admin = $Admin; Db = @{ Name = 'projekt'; User = 'projekt_user'; Password = 'DB-Geheim-456'; Source = 'bei dieser Installation erzeugt' }; AppKey = $AppKey; Backup = $null; BackupSkipped = $false }
+    return @{ Plan = $plan; Admin = $Admin; Db = @{ Name = 'projekt'; User = 'projekt_user'; Password = 'DB-Geheim-456'; Source = 'bei dieser Installation erzeugt'; Generated = $true }; AppKey = $AppKey; Backup = $null; BackupSkipped = $false }
 }
 Test-Case 'Get-FinishAccess: Initialpasswort, DB-Passwort, app.key nur maskiert im Text, Werte getrennt' {
     $a = Get-FinishAccess -Result (New-TestResult)
@@ -1036,6 +1036,23 @@ Test-Case 'Get-FinishAccess: Update ohne DB-Passwort, app.key vorhanden/Vorschla
     Assert (-not $mt.Contains('V' * 43)) 'Vorschlag maskiert'
     Assert ($mt -match 'NUR eintragen') 'Hinweis zum Selbsteintragen bleibt'
     Assert ($mt -match 'vor-snail-1') 'Sicherung sichtbar'
+}
+Test-Case 'Get-FinishAccess: Wiederholen mit DB-Passwort aus der vorhandenen config.php -> vorhanden, unveraendert, kein Anzeigen/Kopieren' {
+    $res = New-TestResult -Mode 'repeat' -AppKey ([pscustomobject]@{ Status = 'present'; Key = ''; Backup = '' }) -Admin @{ Count = 1 }
+    $res.Db = @{ Name = 'projekt'; User = 'projekt_user'; Password = 'DB-Geheim-456'; Source = 'aus der vorhandenen config.php'; Generated = $false }
+    $a = Get-FinishAccess -Result $res
+    Assert-Equal 0 @($a.Secrets).Count 'kein Geheimnis zum Anzeigen'
+    $t = $a.Lines -join "`n"
+    Assert ($t -match 'DB-Passwort: vorhanden, unveraendert \(aus der vorhandenen config.php\)') $t
+    Assert (-not $t.Contains('DB-Geheim-456')) 'Wert nicht im Text'
+}
+Test-Case 'Hinweis nach Update: aus der Liste ConfigAutoKeys, nennt alle Schluessel und CONFIG_VERSION, nur ASCII; PHP-Pruefung nutzt dieselbe Liste' {
+    $n = Get-ConfigAutoKeysNote
+    foreach ($k in @('app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb', 'CONFIG_VERSION')) { Assert ($n.Contains($k)) "fehlt: $k" }
+    Assert ($n -match 'mail.redirect_to und uploads.audio_max_mb') $n
+    Assert ($n -cmatch '^[\x20-\x7E]+$') "nur ASCII: $n"
+    Assert (-not $script:PhpConfigState.Contains('__SNAIL_KEYS__')) 'Platzhalter ersetzt'
+    Assert ($script:PhpConfigState.Contains("['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb']")) 'Liste im PHP-Code'
 }
 Test-Case 'Symbole: archive/box im 24er-Raster, Katalog-Icons gezeichnet oder Buchstabe, Farbe aus tone' {
     foreach ($n in @('archive', 'box')) {
