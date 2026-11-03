@@ -1178,14 +1178,19 @@ function snail_keys($a, $p = '') { $o = []; foreach ($a as $k => $v) { if (is_ar
 function snail_diff($a, $b, $p = '') { if (is_array($a) && is_array($b)) { $o = []; foreach (array_unique(array_merge(array_keys($a), array_keys($b))) as $k) { if (!array_key_exists($k, $a) || !array_key_exists($k, $b)) { $o[] = $p . $k; } else { $o = array_merge($o, snail_diff($a[$k], $b[$k], $p . $k . '.')); } } if ($o === [] && $a !== $b) { $o[] = ($p === '' ? '(Reihenfolge)' : rtrim($p, '.')); } return $o; } return $a === $b ? [] : [($p === '' ? '(Datei)' : rtrim($p, '.'))]; }
 '@
 
-$script:PhpConfigState = $script:PhpConfigHelpers + @'
+# Schluessel, die SNAIL in einer vorhandenen config.php nachtraegt, falls sie
+# fehlen (dazu CONFIG_VERSION eine Stufe hoeher) - eine Liste fuer die PHP-
+# Pruefung und den Hinweis auf "Fertig"
+$script:ConfigAutoKeys = @('app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb')
+
+$script:PhpConfigState = ($script:PhpConfigHelpers + @'
 $c = require $argv[1]; $e = require $argv[2];
 if (!is_array($c) || !is_array($e)) { echo json_encode(['error' => 'kein Array']); exit(1); }
 $o = ['keys' => [], 'version' => (is_int($c['CONFIG_VERSION'] ?? null) ? $c['CONFIG_VERSION'] : null), 'example_version' => (is_int($e['CONFIG_VERSION'] ?? null) ? $e['CONFIG_VERSION'] : null), 'missing' => array_values(array_diff(snail_keys($e), snail_keys($c)))];
-foreach (['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb'] as $k) { [$f, $v] = snail_has($c, $k); [$fe] = snail_has($e, $k); if (!$f) { $s = 'missing'; } elseif ($v === null || $v === '') { $s = 'empty'; } elseif ($k !== 'app.key') { $s = 'set'; } else { $t = is_string($v) ? trim($v) : ''; $r = strlen($t) === 44 ? base64_decode($t, true) : false; $s = ($r !== false && strlen($r) === 32) ? 'valid' : 'invalid'; } $o['keys'][$k] = ['state' => $s, 'example' => $fe]; }
+foreach ([__SNAIL_KEYS__] as $k) { [$f, $v] = snail_has($c, $k); [$fe] = snail_has($e, $k); if (!$f) { $s = 'missing'; } elseif ($v === null || $v === '') { $s = 'empty'; } elseif ($k !== 'app.key') { $s = 'set'; } else { $t = is_string($v) ? trim($v) : ''; $r = strlen($t) === 44 ? base64_decode($t, true) : false; $s = ($r !== false && strlen($r) === 32) ? 'valid' : 'invalid'; } $o['keys'][$k] = ['state' => $s, 'example' => $fe]; }
 $o['audio_example'] = (is_int($e['uploads']['audio_max_mb'] ?? null) && $e['uploads']['audio_max_mb'] > 0) ? $e['uploads']['audio_max_mb'] : null;
 echo json_encode($o);
-'@
+'@).Replace('__SNAIL_KEYS__', ((@($script:ConfigAutoKeys) | ForEach-Object { "'" + $_ + "'" }) -join ', '))
 
 $script:PhpConfigVerify = $script:PhpConfigHelpers + @'
 $old = require $argv[1]; $new = require $argv[2]; $e = require $argv[3];
@@ -3353,7 +3358,7 @@ function Test-Installation {
         $plan.InstalledVersion = $inst.Instance.Version
         if ($UseZip) {
             $plan.Mode = 'update'
-            & $add 'Info' 'Modus' ("Aktualisieren: {0} -> {1} (Sicherung, robocopy, migrate; config.php bleibt, nur ein fehlender app.key wird nachgetragen)" -f $(if ($plan.InstalledVersion) { $plan.InstalledVersion } else { '?' }), $(if ($plan.Template.Version) { $plan.Template.Version } else { '?' }))
+            & $add 'Info' 'Modus' ("Aktualisieren: {0} -> {1} (Sicherung, robocopy, migrate; config.php bleibt, nur fehlende Schluessel wie app.key werden nachgetragen)" -f $(if ($plan.InstalledVersion) { $plan.InstalledVersion } else { '?' }), $(if ($plan.Template.Version) { $plan.Template.Version } else { '?' }))
             if ($plan.Paths) {
                 $plan.BackupInfo = Get-BackupInfo -Root (Get-BackupRoot -Plan $plan)
                 & $add 'Info' 'Sicherung' ("pg_dump + config.php nach {0}\<Zeit> - vorhanden: {1}" -f (Get-BackupRoot -Plan $plan), $plan.BackupInfo.Text)
@@ -3361,7 +3366,7 @@ function Test-Installation {
         } else {
             & $add 'Info' 'Modus' "Einrichtung wiederholen (Programmcode bleibt, Version $($plan.InstalledVersion))"
         }
-        & $add 'Ok' 'config.php' "vorhanden - bleibt unverändert, nur fehlende app.key/app.key_previous/mail.redirect_to werden nachgetragen ($(Join-Path $plan.ProgDir 'config.php'))"
+        & $add 'Ok' 'config.php' ("vorhanden - bleibt unveraendert, nur fehlende {0} werden nachgetragen ({1})" -f ($script:ConfigAutoKeys -join '/'), (Join-Path $plan.ProgDir 'config.php'))
         if ($inst.Instance.InServicesJson -and $inst.Instance.ServicesUrl -ne $inst.Url) {
             & $add 'Info' 'services.json' ("url '{0}' wird an app.url der config.php angeglichen: '{1}'" -f $inst.Instance.ServicesUrl, $inst.Url)
         }
@@ -3575,7 +3580,7 @@ function Invoke-Installation {
         Success = $false; Error = $null; Plan = $Plan; Display = $inst.Display; Url = $inst.Url
         Local = $(if ($inst.Port -gt 0) { "http://localhost:$($inst.Port)/" } else { $inst.Url })
         ConfigFile = (Join-Path $Plan.ProgDir 'config.php'); ConfigNew = $false
-        Db = @{ Name = $Plan.DbName; User = $Plan.DbUser; Password = $null; Source = '' }
+        Db = @{ Name = $Plan.DbName; User = $Plan.DbUser; Password = $null; Source = ''; Generated = $false }
         Admin = $null; Migrations = $null; Check = $null; Rows = @(); CredFile = $null; Backup = $null; BackupSkipped = $false; Verify = $null
         AppKey = [pscustomobject]@{ Status = ''; Key = ''; Changed = @(); Backup = ''; Text = '' }
     }
@@ -3610,6 +3615,7 @@ function Invoke-Installation {
         } elseif ($Plan.Mode -ne 'update') {
             $script:Result.Db.Password = New-RandomPassword
             $script:Result.Db.Source = 'bei dieser Installation erzeugt'
+            $script:Result.Db.Generated = $true
         }
         Write-Log ("Datenbank {0}, Rolle {1}, Passwort {2}." -f $Plan.DbName, $Plan.DbUser, $script:Result.Db.Source)
         # app.key: nur fuer eine neue config.php; eine vorhandene behaelt ihren
@@ -4557,6 +4563,13 @@ function Add-FinishButton {
 #>
 $script:SecretMask = '********'
 
+# Hinweis auf "Fertig" nach einem Update, aus $script:ConfigAutoKeys erzeugt
+function Get-ConfigAutoKeysNote {
+    $k = @($script:ConfigAutoKeys)
+    $list = if ($k.Count -gt 1) { (($k[0..($k.Count - 2)]) -join ', ') + ' und ' + $k[-1] } else { $k -join '' }
+    return ('Neue Konfigurationsschluessel ergaenzt SNAIL nicht (Ausnahme: {0}, falls sie fehlen, dazu CONFIG_VERSION eine Stufe hoeher, wenn danach keiner fehlt) - die Anwendung laeuft mit Standardwerten weiter; Hinweise von check stehen unten ("config.php oeffnen").' -f $list)
+}
+
 function Get-FinishAccess {
     param([Parameter(Mandatory)]$Result)
     $r = $Result
@@ -4577,8 +4590,14 @@ function Get-FinishAccess {
     }
     $lines.Add(("Datenbank  : {0}   Rolle: {1}   ({2}:{3})" -f $r.Db.Name, $r.Db.User, $plan.Pg.Host, $plan.Pg.Port))
     if ($plan.Mode -ne 'update' -and $r.Db.Password) {
-        $lines.Add(("DB-Passwort: {0}   ({1})" -f $mask, $r.Db.Source))
-        $secrets.Add([pscustomobject]@{ Label = 'DB-Passwort'; Value = [string]$r.Db.Password })
+        # nur ein neu erzeugtes Passwort ist ein neues Geheimnis; eines aus der
+        # vorhandenen config.php bleibt wie es ist (kein Anzeigen/Kopieren)
+        if ($r.Db.Generated) {
+            $lines.Add(("DB-Passwort: {0}   ({1})" -f $mask, $r.Db.Source))
+            $secrets.Add([pscustomobject]@{ Label = 'DB-Passwort'; Value = [string]$r.Db.Password })
+        } else {
+            $lines.Add(("DB-Passwort: vorhanden, unveraendert ({0})" -f $r.Db.Source))
+        }
     }
     $ak = $r.AppKey
     switch ($ak.Status) {
@@ -4676,7 +4695,7 @@ function Initialize-FinishPage {
 
     $notiz = New-Object System.Collections.Generic.List[string]
     if ($plan.Mode -ne 'update') { $notiz.Add($(if ($r.ConfigNew) { 'config.php wurde erzeugt.' } else { 'Die vorhandene config.php wurde übernommen.' })) }
-    if ($plan.Mode -eq 'update') { $notiz.Add('Neue Konfigurationsschlüssel ergänzt SNAIL nicht (Ausnahme: app.key, app.key_previous und mail.redirect_to, falls sie fehlen) - die Anwendung läuft mit Standardwerten weiter; Hinweise von check stehen unten ("config.php öffnen").') }
+    if ($plan.Mode -eq 'update') { $notiz.Add((Get-ConfigAutoKeysNote)) }
     if ($ak.Backup) { $notiz.Add('Die Kopie der vorherigen config.php ist nur für Administratoren lesbar; SNAIL löscht sie nicht automatisch.') }
     if ($r.CredFile) { $notiz.Add("Zugangsdaten liegen in $($r.CredFile) - nach dem Übertragen in den Passwortmanager löschen.") }
     if ($r.Backup) { $notiz.Add('SNAIL löscht Sicherungen nie automatisch.') }

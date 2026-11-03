@@ -241,7 +241,8 @@ Für einen Computer-Use-Lauf auf **SRV-Test** gedacht: jeden Schritt der Reihe n
 | 14.5 | „Anzeigen“ bei „app.key“, dann „Verbergen“ | Wert sichtbar (44 Zeichen, gleich `app_key` der Zugangsdatei), Knopf heißt „Verbergen“; danach wieder Punkte, Knopf „Anzeigen“ |
 | 14.6 | Mit dem Initialpasswort über „Kopieren“ in der Anwendung anmelden | Anmeldung klappt, Passwortwechsel erzwungen |
 | 14.7 | Zugangsdatei ansehen | unverändert gegenüber 7.5 (Klartext, nur Administratoren/SYSTEM) |
-| 14.8 | Update einer Installation (ohne neues Geheimnis, app.key vorhanden) → „Fertig“ | keine Zeilen mit „Anzeigen“/„Kopieren“ |
+| 14.8 | Update einer Installation (ohne neues Geheimnis, app.key vorhanden) → „Fertig“ | keine Zeilen mit „Anzeigen“/„Kopieren“; Hinweis „Neue Konfigurationsschluessel ergaenzt SNAIL nicht (Ausnahme: app.key, app.key_previous, mail.redirect_to und uploads.audio_max_mb, falls sie fehlen, dazu CONFIG_VERSION eine Stufe hoeher …)“ |
+| 14.9 | „Einrichtung wiederholen“ (ohne ZIP) → „Fertig“ | „DB-Passwort: vorhanden, unveraendert (aus der vorhandenen config.php)“, **keine** Zeile „DB-Passwort“ mit „Anzeigen“/„Kopieren“ |
 
 ## 15 Upload-Grenze für Audio (SNAIL 7.7, Vorlage mit D5 / `CONFIG_VERSION` 6)
 
