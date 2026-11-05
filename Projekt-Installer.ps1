@@ -1709,6 +1709,16 @@ function Get-UploadLimitBytes {
     return ([long]$mb * 1048576 + 10485760)
 }
 
+# Protokollzeile zur Upload-Grenze der Website (eigene Funktion fuer die Tests)
+function Format-UploadLimitLog {
+    param([long]$Bytes, [int]$MaxMb, $AudioMaxMb = $null, [int]$MinMb = 0, [bool]$KeptHigher = $false)
+    $extra = ''
+    if ($null -ne $AudioMaxMb) { $extra += ", uploads.audio_max_mb = $AudioMaxMb" }
+    if ($MinMb -gt 0) { $extra += ", Mindestwert $MinMb MB" }
+    if ($KeptHigher) { $extra += ', hoeherer Wert der Website bleibt' }
+    return ("Upload-Grenze der Website: {0} Bytes ({1} MB, uploads.max_mb = {2}{3})" -f $Bytes, [math]::Floor($Bytes / 1MB), $MaxMb, $extra)
+}
+
 # Groesste Anfrage, die PHP annehmen muss (MB): max(anfrageMinMb, max_mb, audio_max_mb)
 function Get-UploadNeedMb {
     param([Parameter(Mandatory)][int]$MaxMb, $AudioMaxMb = $null, [int]$MinMb = 0)
@@ -1954,8 +1964,7 @@ function Set-ProjectSite {
     $r = Invoke-AppCmd @('set', 'config', $name, '-section:system.webServer/security/requestFiltering',
         "/requestLimits.maxAllowedContentLength:$bytes", '/commit:apphost')
     if ($r.ExitCode -ne 0) { throw "Upload-Grenze konnte nicht gesetzt werden: $($r.Output)" }
-    Write-Log ("Upload-Grenze der Website: {0} Bytes ({1} MB, uploads.max_mb = {2}{3}{4})" -f $bytes, [math]::Floor($bytes / 1MB), $Plan.Inst.UploadsMaxMb,
-        $(if ($null -ne $audio) { ", uploads.audio_max_mb = $audio" } else { '' }) + $(if ($reqMin -gt 0) { ", Mindestwert $reqMin MB" } else { '' }), $(if ($have -gt $want) { ', hoeherer Wert der Website bleibt' } else { '' })) 'Ok'
+    Write-Log (Format-UploadLimitLog -Bytes $bytes -MaxMb $Plan.Inst.UploadsMaxMb -AudioMaxMb $audio -MinMb $reqMin -KeptHigher ($have -gt $want)) 'Ok'
 
     Start-ProjectPool -Name $name
     $r = Invoke-AppCmd @('start', 'site', "/site.name:$name")
