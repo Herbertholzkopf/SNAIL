@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.7
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.8
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -135,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.7'
+$script:AppVersion = '7.8'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -697,12 +697,23 @@ function ConvertFrom-ProjectJson {
             try { $upload = [int]$d.uploadsMaxMb } catch { $upload = -1 }
             if ($upload -lt 1 -or $upload -gt 4000) { $errors.Add("${where}: uploadsMaxMb muss zwischen 1 und 4000 liegen - es gilt 25."); $upload = 25 }
         }
+        # Server-Mindestwerte (KI ueber das DMS): anfrageMinMb = kleinste Upload-Grenze
+        # der Website (werner 48), memoryMinMb = memory_limit, unter dem "Pruefen" warnt
+        $reqMin = 0; $memMin = $script:MemoryMinMbDefault
+        foreach ($f in @(@{ N = 'anfrageMinMb'; Max = 4000 }, @{ N = 'memoryMinMb'; Max = 65536 })) {
+            $raw = $d.($f.N)
+            if ($null -eq $raw -or [string]$raw -eq '') { continue }
+            $n = 0
+            if (-not [int]::TryParse([string]$raw, [ref]$n) -or $n -lt 0 -or $n -gt $f.Max) { $errors.Add(("{0}: {1} muss zwischen 0 und {2} liegen - wird ignoriert." -f $where, $f.N, $f.Max)); continue }
+            if ($f.N -eq 'anfrageMinMb') { $reqMin = $n } else { $memMin = $n }
+        }
         $mods = @($d.phpModule | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ })
         $needs = @($d.braucht | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ })
         foreach ($n in $needs) { if ($script:KnownNeeds -notcontains $n) { $errors.Add("${where}: braucht '$n' ist unbekannt (bekannt: $($script:KnownNeeds -join ', ')) - wird nicht geprüft.") } }
         $svc = [pscustomobject]@{
             Key = $key; Name = $name; Icon = (Get-JsonString $d.icon); Tone = $tone; Description = (Get-JsonString $d.description)
             Logo = $logo; Zip = $zip; UploadsMaxMb = $upload; PhpModules = $mods; Needs = $needs; InCatalog = $true
+            RequestMinMb = $reqMin; MemoryMinMb = $memMin
         }
         $services[$key] = $svc
         $list.Add($svc)
@@ -720,7 +731,7 @@ function New-PseudoService {
     return [pscustomobject]@{
         Key = $Key; Name = $(if ($Name) { $Name } else { $Key }); Icon = ''; Tone = ''; Description = ''
         Logo = [pscustomobject]@{ Bytes = $null; Ext = ''; Error = ''; Source = '' }; Zip = ''; UploadsMaxMb = 25
-        PhpModules = @(); Needs = @(); InCatalog = $false
+        PhpModules = @(); Needs = @(); InCatalog = $false; RequestMinMb = 0; MemoryMinMb = $script:MemoryMinMbDefault
     }
 }
 
@@ -1252,6 +1263,7 @@ function Backup-ConfigFile {
 #>
 $script:ConfigV4Keys = @('app.key_previous', 'mail.redirect_to')
 $script:AudioMaxMbDefault = 300
+$script:MemoryMinMbDefault = 256
 
 function Update-InstalledConfigKeys {
     param([Parameter(Mandatory)]$Plan)
@@ -1690,9 +1702,81 @@ function Test-WebDavInstalled {
  max(max_mb, audio_max_mb) * 1 MiB + 10 MiB (300 MB -> 325 058 560).
 #>
 function Get-UploadLimitBytes {
-    param([Parameter(Mandatory)][int]$MaxMb, $AudioMaxMb = $null)
-    if ($null -eq $AudioMaxMb) { return [long](($MaxMb + 1) * 1048576) }
-    return ([long][math]::Max($MaxMb, [int]$AudioMaxMb) * 1048576 + 10485760)
+    param([Parameter(Mandatory)][int]$MaxMb, $AudioMaxMb = $null, [int]$MinMb = 0)
+    if ($null -eq $AudioMaxMb -and $MinMb -le 0) { return [long](($MaxMb + 1) * 1048576) }
+    $mb = [math]::Max($MaxMb, $MinMb)
+    if ($null -ne $AudioMaxMb) { $mb = [math]::Max($mb, [int]$AudioMaxMb) }
+    return ([long]$mb * 1048576 + 10485760)
+}
+
+# Protokollzeile zur Upload-Grenze der Website (eigene Funktion fuer die Tests)
+function Format-UploadLimitLog {
+    param([long]$Bytes, [int]$MaxMb, $AudioMaxMb = $null, [int]$MinMb = 0, [bool]$KeptHigher = $false)
+    $extra = ''
+    if ($null -ne $AudioMaxMb) { $extra += ", uploads.audio_max_mb = $AudioMaxMb" }
+    if ($MinMb -gt 0) { $extra += ", Mindestwert $MinMb MB" }
+    if ($KeptHigher) { $extra += ', hoeherer Wert der Website bleibt' }
+    return ("Upload-Grenze der Website: {0} Bytes ({1} MB, uploads.max_mb = {2}{3})" -f $Bytes, [math]::Floor($Bytes / 1MB), $MaxMb, $extra)
+}
+
+# Groesste Anfrage, die PHP annehmen muss (MB): max(anfrageMinMb, max_mb, audio_max_mb)
+function Get-UploadNeedMb {
+    param([Parameter(Mandatory)][int]$MaxMb, $AudioMaxMb = $null, [int]$MinMb = 0)
+    $mb = [math]::Max($MaxMb, $MinMb)
+    if ($null -ne $AudioMaxMb) { $mb = [math]::Max($mb, [int]$AudioMaxMb) }
+    return [int]$mb
+}
+
+<#
+ FastCGI (KI ueber das DMS): werner und die Programme warten bis 930 s auf
+ einen KI-Aufruf, deshalb activityTimeout/requestTimeout >= 960 s. IIS kennt
+ die Werte nur je FastCGI-Anwendung (fullPath + arguments), sie gelten fuer
+ alle Websites dieser php-cgi.exe - deshalb setzt sie WIPP global, SNAIL
+ prueft nur ("Pruefen"). IIS-Standard ohne Eintrag: 30 / 90 s.
+#>
+$script:FastCgiMinTimeout = 960
+
+# Attribute aller <add .../>-Elemente aus der Ausgabe von "appcmd list config"
+function ConvertFrom-AppCmdAdds {
+    param([string]$Text)
+    $list = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($m in [regex]::Matches([string]$Text, '<(?:add|application)\s+([^>]*?)/?>', 'IgnoreCase')) {
+        $h = @{}
+        foreach ($a in [regex]::Matches($m.Groups[1].Value, '([A-Za-z]+)="([^"]*)"')) { $h[$a.Groups[1].Value] = $a.Groups[2].Value }
+        $list.Add($h)
+    }
+    return $list.ToArray()
+}
+
+# Zeitlimits der FastCGI-Anwendung (fehlt das Attribut: IIS-Standard)
+function Get-FastCgiTimeouts {
+    param([string]$FastCgiText, [Parameter(Mandatory)][string]$FullPath, [string]$Arguments = '')
+    foreach ($a in @(ConvertFrom-AppCmdAdds $FastCgiText)) {
+        if (-not $a.ContainsKey('fullPath') -or $a['fullPath'] -ine $FullPath) { continue }
+        $args0 = if ($a.ContainsKey('arguments')) { $a['arguments'] } else { '' }
+        if ($args0 -ne $Arguments) { continue }
+        return [pscustomobject]@{
+            Activity = $(if ($a.ContainsKey('activityTimeout')) { [int]$a['activityTimeout'] } else { 30 })
+            Request  = $(if ($a.ContainsKey('requestTimeout')) { [int]$a['requestTimeout'] } else { 90 })
+        }
+    }
+    return $null
+}
+
+# Hinweis fuer "Pruefen": Zeitlimits der FastCGI-Anwendung von php-cgi.exe neben
+# php.exe (ohne Argumente, wie WIPP sie anlegt) unter dem Mindestwert?
+function Get-FastCgiTimeoutCheck {
+    param([string]$FastCgiText, [Parameter(Mandatory)][string]$PhpExe, [int]$Seconds = $script:FastCgiMinTimeout)
+    # String statt Split-Path: gleiches Ergebnis unter Windows, und die Tests laufen unter Linux
+    $pos = $PhpExe.LastIndexOfAny([char[]]@('\', '/'))
+    $cgi = if ($pos -ge 0) { $PhpExe.Substring(0, $pos + 1) + 'php-cgi.exe' } else { 'php-cgi.exe' }
+    $t = Get-FastCgiTimeouts -FastCgiText $FastCgiText -FullPath $cgi
+    if (-not $t) { return [pscustomobject]@{ Level = 'Info'; Text = "Keine FastCGI-Anwendung fuer $cgi gefunden - Zeitlimits nicht geprueft (WIPP legt sie an)." } }
+    $txt = "FastCGI $cgi`: activityTimeout $($t.Activity) s, requestTimeout $($t.Request) s"
+    if ($t.Activity -lt $Seconds -or $t.Request -lt $Seconds) {
+        return [pscustomobject]@{ Level = 'Warn'; Text = "$txt - fuer KI ueber das DMS mindestens $Seconds s (setzt WIPP global; sonst brechen lange KI-Aufrufe ab)." }
+    }
+    return [pscustomobject]@{ Level = 'Ok'; Text = "$txt (>= $Seconds s)." }
 }
 
 <#
@@ -1873,14 +1957,14 @@ function Set-ProjectSite {
     Write-Log "Anonyme Anfragen laufen als IIS AppPool\$name." 'Ok'
 
     $audio = Get-PlanAudioMaxMb -Plan $Plan
-    $want = Get-UploadLimitBytes -MaxMb $Plan.Inst.UploadsMaxMb -AudioMaxMb $audio
+    $reqMin = [int]$Plan.Inst.Service.RequestMinMb
+    $want = Get-UploadLimitBytes -MaxMb $Plan.Inst.UploadsMaxMb -AudioMaxMb $audio -MinMb $reqMin
     $have = Get-IisUploadLimit -Site $name
     $bytes = [long][math]::Max($want, $have)
     $r = Invoke-AppCmd @('set', 'config', $name, '-section:system.webServer/security/requestFiltering',
         "/requestLimits.maxAllowedContentLength:$bytes", '/commit:apphost')
     if ($r.ExitCode -ne 0) { throw "Upload-Grenze konnte nicht gesetzt werden: $($r.Output)" }
-    Write-Log ("Upload-Grenze der Website: {0} Bytes ({1} MB, uploads.max_mb = {2}{3}{4})" -f $bytes, [math]::Floor($bytes / 1MB), $Plan.Inst.UploadsMaxMb,
-        $(if ($null -ne $audio) { ", uploads.audio_max_mb = $audio" } else { '' }), $(if ($have -gt $want) { ', hoeherer Wert der Website bleibt' } else { '' })) 'Ok'
+    Write-Log (Format-UploadLimitLog -Bytes $bytes -MaxMb $Plan.Inst.UploadsMaxMb -AudioMaxMb $audio -MinMb $reqMin -KeptHigher ($have -gt $want)) 'Ok'
 
     Start-ProjectPool -Name $name
     $r = Invoke-AppCmd @('start', 'site', "/site.name:$name")
@@ -2584,19 +2668,37 @@ function Find-PhpExe {
     return $null
 }
 
+<#
+ Server-Werte fuer KI ueber das DMS (Vorlage docs/03): memory_limit >= Mindestwert
+ des Katalogs (werner 512, sonst 256; -1 = unbegrenzt), max_input_time -1.
+ Gelesen mit php.exe - dieselbe php.ini wie php-cgi.exe, wenn beide im selben
+ Ordner liegen (windows-pruefung.ps1 vergleicht das). Nur Hinweise.
+#>
+function Get-PhpServerWarnings {
+    param([string]$Memory = '', [string]$MaxInputTime = '', [int]$MemoryMinMb = 0)
+    $w = @()
+    if ($Memory -and $MemoryMinMb -gt 0 -and $Memory.Trim() -ne '-1') {
+        $mb = ConvertTo-Megabytes $Memory
+        if ($mb -ge 0 -and $mb -lt $MemoryMinMb) { $w += ("php.ini: memory_limit {0} - fuer KI ueber das DMS mindestens {1}M (die Anwendung hebt es per ini_set selbst an, wenn das erlaubt ist)." -f $Memory, $MemoryMinMb) }
+    }
+    if ($MaxInputTime -and $MaxInputTime.Trim() -ne '-1') { $w += ("php.ini: max_input_time {0} - empfohlen -1 (grosse Uploads und KI-Anfragen brechen sonst ab)." -f $MaxInputTime) }
+    return $w
+}
+
 # Version, Module und Upload-Grenzen von php.exe
 function Get-PhpInfo {
     param([Parameter(Mandatory)][string]$Exe)
-    $code = 'echo PHP_VERSION, "|", ini_get("upload_max_filesize"), "|", ini_get("post_max_size"), "|", implode(",", array_map("strtolower", get_loaded_extensions()));'
+    $code = 'echo PHP_VERSION, "|", ini_get("upload_max_filesize"), "|", ini_get("post_max_size"), "|", implode(",", array_map("strtolower", get_loaded_extensions())), "|", ini_get("memory_limit"), "|", ini_get("max_input_time");'
     $r = Invoke-ExeCapture -FilePath $Exe -ArgumentList (ConvertTo-CmdArgs @('-r', $code)) -Utf8Output -TimeoutSec 60
     $line = @($r.Output -split "`r?`n" | Where-Object { $_ -match '^\d+\.\d+\.\d+.*\|' }) | Select-Object -First 1
-    $info = [pscustomobject]@{ Version = $null; Text = ''; Upload = ''; Post = ''; Modules = @(); LoadErrors = @() }
+    $info = [pscustomobject]@{ Version = $null; Text = ''; Upload = ''; Post = ''; Modules = @(); LoadErrors = @(); Memory = ''; MaxInputTime = '' }
     if ($line) {
         $parts = $line -split '\|'
         if ($parts[0] -match '^(\d+\.\d+\.\d+)') { $info.Version = [version]$Matches[1] }
         $info.Text = $parts[0]
         $info.Upload = $parts[1]; $info.Post = $parts[2]
         $info.Modules = @($parts[3] -split ',')
+        if ($parts.Count -gt 5) { $info.Memory = $parts[4]; $info.MaxInputTime = $parts[5] }
     } else {
         $info.Text = ($r.Lines | Select-Object -First 1)
     }
@@ -3348,7 +3450,15 @@ function Test-Installation {
     $exRoot = if ($srcRoot) { $srcRoot } else { $plan.ProgDir }
     $plan.TemplateAudioMaxMb = Get-ExampleAudioMaxMb -ExampleFile ([System.IO.Path]::Combine($exRoot, 'config.example.php')) -PhpExe $php
     $audioMb = Get-PlanAudioMaxMb -Plan $plan
-    $limit = Get-UploadLimitBytes -MaxMb $inst.UploadsMaxMb -AudioMaxMb $audioMb
+    $reqMin = [int]$inst.Service.RequestMinMb
+    $limit = Get-UploadLimitBytes -MaxMb $inst.UploadsMaxMb -AudioMaxMb $audioMb -MinMb $reqMin
+    if ($reqMin -gt 0) { & $add 'Info' 'Upload-Grenze' ("Mindestwert des Katalogs fuer {0}: {1} MB (KI-Routen)" -f $inst.Service.Name, $reqMin) }
+    if ($php -and (Test-Path -LiteralPath $script:AppCmd)) {
+        try {
+            $fc = Get-FastCgiTimeoutCheck -FastCgiText ((Invoke-AppCmd @('list', 'config', '-section:system.webServer/fastCgi')).Lines -join "`n") -PhpExe $php
+            & $add $fc.Level 'FastCGI' $fc.Text
+        } catch { }
+    }
     if ($null -ne $audioMb) {
         & $add 'Info' 'Upload-Grenze' ("uploads.max_mb {0} MB, uploads.audio_max_mb {1} MB -> IIS maxAllowedContentLength {2} Bytes (ein hoeherer Wert der Website bleibt)" -f $inst.UploadsMaxMb, $audioMb, $limit)
     } else {
@@ -3389,7 +3499,8 @@ function Test-Installation {
             else { & $add 'Error' 'PHP-Module' ("fehlen: {0} - in der php.ini aktivieren und IIS neu starten." -f ($missing -join ', ')) }
             if ($pi.Modules -notcontains 'gd') { & $add 'Warn' 'PHP-Module' 'gd fehlt - keine Vorschaubilder.' }
             $up = ConvertTo-Megabytes $pi.Upload; $post = ConvertTo-Megabytes $pi.Post
-            $maxUp = if ($null -ne $audioMb) { [math]::Max($inst.UploadsMaxMb, $audioMb) } else { $inst.UploadsMaxMb }
+            $maxUp = Get-UploadNeedMb -MaxMb $inst.UploadsMaxMb -AudioMaxMb $audioMb -MinMb $reqMin
+            foreach ($w in @(Get-PhpServerWarnings -Memory $pi.Memory -MaxInputTime $pi.MaxInputTime -MemoryMinMb ([int]$inst.Service.MemoryMinMb))) { & $add 'Warn' 'PHP' $w }
             if (($up -ge 0 -and $up -lt $maxUp) -or ($post -ge 0 -and $post -lt $maxUp)) {
                 & $add 'Warn' 'Upload' ("php.ini: upload_max_filesize {0}, post_max_size {1} - kleiner als die Upload-Grenze ({2} MB)." -f $pi.Upload, $pi.Post, $maxUp)
             }

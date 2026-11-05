@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -1070,6 +1070,80 @@ Test-Case 'Symbole: archive/box im 24er-Raster, Katalog-Icons gezeichnet oder Bu
 Test-Case 'Get-DbCtypeCandidates: Ausgabe von PostgreSQL 18.6 unter Windows (msvc)' {
     Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35217, 64-bit')[0]
     Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6, compiled by msvc-19.44.35217, 64-bit')[0] 'auch ohne windows im Text'
+}
+
+# =============================================================================
+Write-Host "`n== Server-Werte fuer KI ueber das DMS (FastCGI, Upload-Grenze, php.ini)"
+$fastCgiOut = @'
+<system.webServer>
+  <fastCgi>
+    <application fullPath="C:\Program Files\PHP\php-cgi.exe" arguments="-d memory_limit=512M" activityTimeout="1200" requestTimeout="1200" />
+    <application fullPath="C:\Program Files\PHP\php-cgi.exe" activityTimeout="600" requestTimeout="900" instanceMaxRequests="10000">
+      <environmentVariables>
+        <add name="PHP_FCGI_MAX_REQUESTS" value="10000" />
+      </environmentVariables>
+    </application>
+    <application fullPath="D:\PHP84\php-cgi.exe" />
+  </fastCgi>
+</system.webServer>
+'@
+Test-Case 'FastCGI: Zeitlimits aus der appcmd-Ausgabe, Argumente unterscheiden, IIS-Standard' {
+    $t = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\Program Files\PHP\php-cgi.exe'
+    Assert-Equal 600 $t.Activity; Assert-Equal 900 $t.Request
+    $t2 = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\Program Files\PHP\php-cgi.exe' -Arguments '-d memory_limit=512M'
+    Assert-Equal 1200 $t2.Request 'Anwendung mit Argumenten'
+    $t3 = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'd:\php84\PHP-CGI.EXE'
+    Assert-Equal 30 $t3.Activity 'IIS-Standard activityTimeout'; Assert-Equal 90 $t3.Request 'IIS-Standard requestTimeout'
+    Assert ($null -eq (Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\gibts\php-cgi.exe')) 'unbekannt'
+}
+Test-Case 'FastCGI-Hinweis auf Pruefen: unter 960 s Warnung, sonst OK, fehlt -> Info; SNAIL setzt nichts (WIPP)' {
+    $w = Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'C:\Program Files\PHP\php.exe'
+    Assert-Equal 'Warn' $w.Level; Assert ($w.Text -match 'activityTimeout 600 s, requestTimeout 900 s' -and $w.Text -match '960') $w.Text
+    $ok = Get-FastCgiTimeoutCheck -FastCgiText ($fastCgiOut -replace 'activityTimeout="600" requestTimeout="900"', 'activityTimeout="960" requestTimeout="3600"') -PhpExe 'C:\Program Files\PHP\php.exe'
+    Assert-Equal 'Ok' $ok.Level $ok.Text
+    Assert-Equal 'Warn' (Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'D:\PHP84\php.exe').Level 'IIS-Standard 30/90'
+    Assert-Equal 'Info' (Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'E:\x\php.exe').Level 'keine Anwendung'
+    foreach ($x in @($w.Text, $ok.Text)) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
+    Assert (-not (Get-Command Set-FastCgiTimeouts -ErrorAction SilentlyContinue)) 'kein Schritt, der FastCGI setzt'
+}
+Test-Case 'Upload-Grenze mit Mindestwert des Katalogs (werner 48 MB), Bedarf fuer php.ini' {
+    Assert-Equal ([long](26 * 1048576)) (Get-UploadLimitBytes -MaxMb 25) 'ohne Mindestwert und Audio wie bisher'
+    Assert-Equal ([long](48 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 25 -MinMb 48) 'werner ohne Audio'
+    Assert-Equal ([long]325058560) (Get-UploadLimitBytes -MaxMb 25 -AudioMaxMb 300 -MinMb 48) 'Audio groesser'
+    Assert-Equal ([long](250 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 250 -MinMb 48)
+    Assert-Equal 48 (Get-UploadNeedMb -MaxMb 25 -MinMb 48); Assert-Equal 300 (Get-UploadNeedMb -MaxMb 25 -AudioMaxMb 300 -MinMb 48); Assert-Equal 25 (Get-UploadNeedMb -MaxMb 25)
+}
+Test-Case 'Format-UploadLimitLog: alle vier Faelle (mit/ohne Audio, mit/ohne Mindestwert) und hoeherer Wert' {
+    Assert-Equal 'Upload-Grenze der Website: 27262976 Bytes (26 MB, uploads.max_mb = 25)' (Format-UploadLimitLog -Bytes 27262976 -MaxMb 25)
+    Assert-Equal 'Upload-Grenze der Website: 325058560 Bytes (310 MB, uploads.max_mb = 25, uploads.audio_max_mb = 300)' (Format-UploadLimitLog -Bytes 325058560 -MaxMb 25 -AudioMaxMb 300)
+    Assert-Equal 'Upload-Grenze der Website: 60817408 Bytes (58 MB, uploads.max_mb = 25, Mindestwert 48 MB)' (Format-UploadLimitLog -Bytes 60817408 -MaxMb 25 -MinMb 48)
+    Assert-Equal 'Upload-Grenze der Website: 325058560 Bytes (310 MB, uploads.max_mb = 25, uploads.audio_max_mb = 300, Mindestwert 48 MB)' (Format-UploadLimitLog -Bytes 325058560 -MaxMb 25 -AudioMaxMb 300 -MinMb 48)
+    Assert-Equal 'Upload-Grenze der Website: 2000000000 Bytes (1907 MB, uploads.max_mb = 25, Mindestwert 48 MB, hoeherer Wert der Website bleibt)' (Format-UploadLimitLog -Bytes 2000000000 -MaxMb 25 -MinMb 48 -KeptHigher $true)
+}
+Test-Case 'Skript: kein "-f ... + ..." ohne Klammern (Komma bindet staerker als +, -f wirft dann)' {
+    $hits = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.BinaryExpressionAst] -and @('Plus', 'Minus') -contains [string]$n.Operator -and $n.Left -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$n.Left.Operator -eq 'Format' }, $true))
+    Assert-Equal 0 $hits.Count (($hits | ForEach-Object { "Zeile $($_.Extent.StartLineNumber)" }) -join ', ')
+}
+Test-Case 'php.ini-Hinweise: memory_limit gegen Mindestwert, -1 unbegrenzt, max_input_time -1; nur ASCII' {
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '512M' -MaxInputTime '-1' -MemoryMinMb 512).Count
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '-1' -MaxInputTime '-1' -MemoryMinMb 512).Count 'unbegrenzt'
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '1G' -MaxInputTime '-1' -MemoryMinMb 512).Count
+    $w = @(Get-PhpServerWarnings -Memory '256M' -MaxInputTime '60' -MemoryMinMb 512)
+    Assert-Equal 2 $w.Count ($w -join ' | ')
+    Assert ($w[0] -match '512M') $w[0]
+    foreach ($t in $w) { Assert ($t -cmatch '^[\x20-\x7E]+$') "nur ASCII: $t" }
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '128M' -MaxInputTime '' -MemoryMinMb 0).Count 'ohne Mindestwert'
+}
+Test-Case 'Katalog: werner anfrageMinMb 48 / memoryMinMb 512, sonst 0 / 256; ungueltige Werte gemeldet' {
+    $w = $catalog.Services['werner']
+    Assert-Equal 48 $w.RequestMinMb; Assert-Equal 512 $w.MemoryMinMb
+    Assert-Equal 0 $catalog.Services['projekt'].RequestMinMb; Assert-Equal 256 $catalog.Services['projekt'].MemoryMinMb
+    $j = '{ "format": 1, "einstellungen": {}, "dienste": [ { "key": "x", "name": "X", "anfrageMinMb": -5, "memoryMinMb": "viel" } ] }' | ConvertFrom-Json
+    $r = ConvertFrom-ProjectJson -Json $j -BaseDir $tmp
+    Assert-Equal 2 @($r.Errors | Where-Object { $_ -match 'anfrageMinMb|memoryMinMb' }).Count ($r.Errors -join ' | ')
+    Assert-Equal 0 $r.Services['x'].RequestMinMb; Assert-Equal 256 $r.Services['x'].MemoryMinMb
+    $p = New-PseudoService -Key 'alt'
+    Assert-Equal 0 $p.RequestMinMb; Assert-Equal 256 $p.MemoryMinMb
 }
 
 # =============================================================================

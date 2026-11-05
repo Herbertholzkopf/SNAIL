@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.7“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.8“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.7.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.8.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -257,6 +257,20 @@ Braucht eine projektvorlage mit `uploads.audio_max_mb` in der `config.example.ph
 | 15.5 | `$appcmd set config projekt-audio -section:system.webServer/security/requestFiltering /requestLimits.maxAllowedContentLength:2000000000 /commit:apphost` → „Einrichtung wiederholen“ | `maxAllowedContentLength="2000000000"` bleibt; Protokoll „… hoeherer Wert der Website bleibt“ |
 | 15.6 | Rückfall: Installation mit einer Vorlage **ohne** `uploads.audio_max_mb` wiederholen | „Prüfen“: „… (Vorlage ohne uploads.audio_max_mb)“, Grenze wie bisher `uploads.max_mb + 1 MB`; `config.php` unverändert (Hash) |
 | 15.7 | `php C:\AK\projekt-audio\bin\console info` | `"uploads_audio_max_mb": 300` (bzw. 120 nach 15.4) |
+
+## 16 Server-Werte für KI über das DMS (SNAIL 7.8)
+
+FastCGI-Zeitlimits (960 s) und `memory_limit` (512M) setzt **WIPP** global; SNAIL prüft nur. `$fcgi` meint `$appcmd list config -section:system.webServer/fastCgi`.
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 16.1 | `$fcgi` | Werte `activityTimeout`/`requestTimeout` der `php-cgi.exe` notieren (mit aktuellem WIPP 960/960; fehlen sie: IIS-Standard 30/90 s) |
+| 16.2 | Neuinstallation werner (Katalog „werner“) → „Prüfen“ | ℹ Upload-Grenze „… -> IIS maxAllowedContentLength …“ und „Mindestwert des Katalogs fuer werner: 48 MB (KI-Routen)“; ✓ FastCGI „…php-cgi.exe: activityTimeout 960 s, requestTimeout 960 s (>= 960 s).“ (darunter ⚠ „… mindestens 960 s (setzt WIPP global …)“); ⚠ PHP „memory_limit … mindestens 512M …“, falls die php.ini weniger hat; ⚠ „max_input_time …“, falls nicht -1 |
+| 16.3 | „Installieren“ | **kein** Schritt zu FastCGI; `$fcgi` vorher = nachher (SNAIL ändert nichts Globales) |
+| 16.4 | Gegenprobe: `$appcmd set config -section:system.webServer/fastCgi "/[fullPath='<php-cgi.exe>'].requestTimeout:600" /commit:apphost` → werner „Einrichtung wiederholen“ → „Prüfen“, danach Wert zurück auf 960 | ⚠ FastCGI „… requestTimeout 600 s - fuer KI ueber das DMS mindestens 960 s …“; der Lauf ändert den Wert nicht |
+| 16.5 | `$appcmd list config werner -section:system.webServer/security/requestFiltering` (werner mit `max_mb` 25, ohne Audio-Schlüssel) | `maxAllowedContentLength="60817408"` (= 48 MiB + 10 MiB); mit `audio_max_mb` 300: 325058560 |
+| 16.6 | Neuinstallation eines Programms (z. B. Projektvorlage, Mandant `ki`) → „Prüfen“ | Upload-Grenze ohne Mindestwert wie bisher; ⚠ memory_limit erst unter 256M |
+| 16.7 | `tools\windows-pruefung.ps1` von werner | Zeile „FastCGI: activityTimeout 960 s, requestTimeout 960 s …“, keine Warnung zu den Zeitlimits |
 
 ## Ergebnis festhalten
 
