@@ -13,7 +13,7 @@
   },
   "dienste": [
     {
-      "_doku": "key = app.service (a-z, 0-9, _ und -, max. 64 Zeichen). icon: Lucide-Name aus dem Designsystem (Standard box). tone: info, success, warning, danger, primary, purple, amber, muted, neutral. logo: Bilddatei relativ zur projekte.json, z. B. logos/olaf.svg (svg, png, webp, jpg; max. 1 MB); SNAIL kopiert es nach C:\\AK\\logos\\<key>.<ext>. zip: vorgeschlagene ZIP-Datei (relativ zur projekte.json). uploadsMaxMb: Vorschlag fuer uploads.max_mb. phpModule: zusaetzliche PHP-Module. braucht: z. B. [\"python\"] - SNAIL prueft dann python.exe und traegt den Pfad in die config.php ein, wenn die config.example.php den Schluessel python.exe hat.",
+      "_doku": "key = app.service (a-z, 0-9, _ und -, max. 64 Zeichen). icon: Lucide-Name aus dem Designsystem (Standard box). tone: info, success, warning, danger, primary, purple, amber, muted, neutral. logo: Bilddatei relativ zur projekte.json, z. B. logos/olaf.svg (svg, png, webp, jpg; max. 1 MB); SNAIL kopiert es nach C:\\AK\\logos\\<key>.<ext>. zip: vorgeschlagene ZIP-Datei (relativ zur projekte.json). uploadsMaxMb: Vorschlag fuer uploads.max_mb. phpModule: zusaetzliche PHP-Module. braucht: z. B. [\"python\"] - SNAIL prueft dann python.exe und traegt den Pfad in die config.php ein, wenn die config.example.php den Schluessel python.exe hat. anfrageMinMb: kleinste Upload-Grenze der Website in MB (werner 48 fuer KI-Routen, Standard 0). memoryMinMb: memory_limit, unter dem Pruefen warnt (Standard 256, werner 512).",
       "key": "projekt",
       "name": "Projektvorlage",
       "icon": "box",
@@ -35,6 +35,8 @@
       "description": "DMS",
       "zip": "werner-main.zip",
       "uploadsMaxMb": 250,
+      "anfrageMinMb": 48,
+      "memoryMinMb": 512,
       "phpModule": [],
       "braucht": []
     },

@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -1070,6 +1070,82 @@ Test-Case 'Symbole: archive/box im 24er-Raster, Katalog-Icons gezeichnet oder Bu
 Test-Case 'Get-DbCtypeCandidates: Ausgabe von PostgreSQL 18.6 unter Windows (msvc)' {
     Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35217, 64-bit')[0]
     Assert-Equal 'German_Germany.1252' @(Get-DbCtypeCandidates -ServerVersion 'PostgreSQL 18.6, compiled by msvc-19.44.35217, 64-bit')[0] 'auch ohne windows im Text'
+}
+
+# =============================================================================
+Write-Host "`n== Server-Werte fuer KI ueber das DMS (FastCGI, Upload-Grenze, php.ini)"
+$handlersOut = @'
+<system.webServer>
+  <handlers accessPolicy="Read, Script">
+    <add name="PHP_via_FastCGI" path="*.php" verb="*" modules="FastCgiModule" scriptProcessor="C:\Program Files\PHP\php-cgi.exe" resourceType="Either" requireAccess="Script" />
+    <add name="StaticFile" path="*" verb="*" modules="StaticFileModule" resourceType="Either" requireAccess="Read" />
+  </handlers>
+</system.webServer>
+'@
+$fastCgiOut = @'
+<system.webServer>
+  <fastCgi>
+    <application fullPath="C:\Program Files\PHP\php-cgi.exe" arguments="-d memory_limit=512M" activityTimeout="1200" requestTimeout="1200" />
+    <application fullPath="C:\Program Files\PHP\php-cgi.exe" activityTimeout="600" requestTimeout="900" instanceMaxRequests="10000">
+      <environmentVariables>
+        <add name="PHP_FCGI_MAX_REQUESTS" value="10000" />
+      </environmentVariables>
+    </application>
+    <application fullPath="D:\PHP84\php-cgi.exe" />
+  </fastCgi>
+</system.webServer>
+'@
+Test-Case 'FastCGI: Handler und Anwendung aus der appcmd-Ausgabe, Standardwerte, Argumente unterscheiden' {
+    $p = Get-PhpHandlerProcessor $handlersOut
+    Assert-Equal 'C:\Program Files\PHP\php-cgi.exe' $p.FullPath; Assert-Equal '' $p.Arguments
+    $p2 = Get-PhpHandlerProcessor ($handlersOut -replace 'php-cgi.exe"', 'php-cgi.exe|-d memory_limit=512M"')
+    Assert-Equal '-d memory_limit=512M' $p2.Arguments
+    Assert ($null -eq (Get-PhpHandlerProcessor '<handlers><add name="x" path="*" /></handlers>')) 'ohne *.php'
+    $t = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\Program Files\PHP\php-cgi.exe'
+    Assert-Equal 600 $t.Activity; Assert-Equal 900 $t.Request
+    $t2 = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\Program Files\PHP\php-cgi.exe' -Arguments '-d memory_limit=512M'
+    Assert-Equal 1200 $t2.Request 'Anwendung mit Argumenten'
+    $t3 = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'd:\php84\PHP-CGI.EXE'
+    Assert-Equal 30 $t3.Activity 'IIS-Standard activityTimeout'; Assert-Equal 90 $t3.Request 'IIS-Standard requestTimeout'
+    Assert ($null -eq (Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\gibts\php-cgi.exe')) 'unbekannt'
+}
+Test-Case 'FastCGI: appcmd-Argumente nur zum Anheben, nie senken' {
+    $a = Get-FastCgiTimeoutArgs -FullPath 'C:\Program Files\PHP\php-cgi.exe' -Current ([pscustomobject]@{ Activity = 600; Request = 900 })
+    Assert-Equal "set|config|-section:system.webServer/fastCgi|/[fullPath='C:\Program Files\PHP\php-cgi.exe'].activityTimeout:960|/[fullPath='C:\Program Files\PHP\php-cgi.exe'].requestTimeout:960|/commit:apphost" ($a -join '|')
+    $b = Get-FastCgiTimeoutArgs -FullPath 'C:\PHP\php-cgi.exe' -Arguments '-d x=1' -Current ([pscustomobject]@{ Activity = 1200; Request = 300 })
+    Assert-Equal "set|config|-section:system.webServer/fastCgi|/[fullPath='C:\PHP\php-cgi.exe',arguments='-d x=1'].requestTimeout:960|/commit:apphost" ($b -join '|') 'nur requestTimeout'
+    Assert-Equal 0 @(Get-FastCgiTimeoutArgs -FullPath 'C:\PHP\php-cgi.exe' -Current ([pscustomobject]@{ Activity = 960; Request = 3600 })).Count 'reicht -> nichts'
+    $threw = $false
+    try { Get-FastCgiTimeoutArgs -FullPath "C:\P'HP\php-cgi.exe" -Current ([pscustomobject]@{ Activity = 1; Request = 1 }) | Out-Null } catch { $threw = $true }
+    Assert $threw 'Apostroph abgelehnt'
+}
+Test-Case 'Upload-Grenze mit Mindestwert des Katalogs (werner 48 MB), Bedarf fuer php.ini' {
+    Assert-Equal ([long](26 * 1048576)) (Get-UploadLimitBytes -MaxMb 25) 'ohne Mindestwert und Audio wie bisher'
+    Assert-Equal ([long](48 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 25 -MinMb 48) 'werner ohne Audio'
+    Assert-Equal ([long]325058560) (Get-UploadLimitBytes -MaxMb 25 -AudioMaxMb 300 -MinMb 48) 'Audio groesser'
+    Assert-Equal ([long](250 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 250 -MinMb 48)
+    Assert-Equal 48 (Get-UploadNeedMb -MaxMb 25 -MinMb 48); Assert-Equal 300 (Get-UploadNeedMb -MaxMb 25 -AudioMaxMb 300 -MinMb 48); Assert-Equal 25 (Get-UploadNeedMb -MaxMb 25)
+}
+Test-Case 'php.ini-Hinweise: memory_limit gegen Mindestwert, -1 unbegrenzt, max_input_time -1; nur ASCII' {
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '512M' -MaxInputTime '-1' -MemoryMinMb 512).Count
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '-1' -MaxInputTime '-1' -MemoryMinMb 512).Count 'unbegrenzt'
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '1G' -MaxInputTime '-1' -MemoryMinMb 512).Count
+    $w = @(Get-PhpServerWarnings -Memory '256M' -MaxInputTime '60' -MemoryMinMb 512)
+    Assert-Equal 2 $w.Count ($w -join ' | ')
+    Assert ($w[0] -match '512M') $w[0]
+    foreach ($t in $w) { Assert ($t -cmatch '^[\x20-\x7E]+$') "nur ASCII: $t" }
+    Assert-Equal 0 @(Get-PhpServerWarnings -Memory '128M' -MaxInputTime '' -MemoryMinMb 0).Count 'ohne Mindestwert'
+}
+Test-Case 'Katalog: werner anfrageMinMb 48 / memoryMinMb 512, sonst 0 / 256; ungueltige Werte gemeldet' {
+    $w = $catalog.Services['werner']
+    Assert-Equal 48 $w.RequestMinMb; Assert-Equal 512 $w.MemoryMinMb
+    Assert-Equal 0 $catalog.Services['projekt'].RequestMinMb; Assert-Equal 256 $catalog.Services['projekt'].MemoryMinMb
+    $j = '{ "format": 1, "einstellungen": {}, "dienste": [ { "key": "x", "name": "X", "anfrageMinMb": -5, "memoryMinMb": "viel" } ] }' | ConvertFrom-Json
+    $r = ConvertFrom-ProjectJson -Json $j -BaseDir $tmp
+    Assert-Equal 2 @($r.Errors | Where-Object { $_ -match 'anfrageMinMb|memoryMinMb' }).Count ($r.Errors -join ' | ')
+    Assert-Equal 0 $r.Services['x'].RequestMinMb; Assert-Equal 256 $r.Services['x'].MemoryMinMb
+    $p = New-PseudoService -Key 'alt'
+    Assert-Equal 0 $p.RequestMinMb; Assert-Equal 256 $p.MemoryMinMb
 }
 
 # =============================================================================

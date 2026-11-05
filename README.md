@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.7**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.8**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -140,6 +140,8 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | `uploadsMaxMb` | – | Vorschlag für die Upload-Grenze (1–4000, Standard 25) |
 | `phpModule` | – | zusätzliche PHP-Module über `requirements.extensions` der Vorlage hinaus |
 | `braucht` | – | `["python"]`: SNAIL prüft, dass `python.exe` vorhanden ist (PATH, Registry; WIPP installiert es optional), und trägt den Pfad als `python.exe` in die `config.php` ein, **wenn** die `config.example.php` des Projekts diesen Schlüssel hat. Die Skripte laufen über den Aufgabenplaner der Anwendung (`tasks:run`), nicht als eigene Windows-Aufgaben |
+| `anfrageMinMb` | 0 | kleinste Upload-Grenze der Website in MB, unabhängig von `uploads.max_mb` (werner: **48** für die KI-Routen, siehe [Server-Werte für KI](#server-werte-für-ki-über-das-dms)) |
+| `memoryMinMb` | 256 | `memory_limit`, unter dem „Prüfen“ warnt (werner: **512**) |
 
 **ZIP und Katalog-Eintrag:** Auf „Prüfen“ warnt SNAIL, wenn die gewählte ZIP nicht zum Eintrag passt – zuerst nach `app.service` in der `config.example.php` der ZIP (die Vorlage selbst: `projekt`, werner: `werner`), sonst nach dem Projektstamm gegen den Namen der vorgeschlagenen ZIP (`zip` `werner-main.zip` → Projektstamm `werner-main`). Beim Aktualisieren gilt dasselbe gegen den installierten Dienst. Es bleibt eine Warnung: Ein Programm kann bewusst aus einer anderen ZIP installiert werden (z. B. die Vorlage als Renate zum Testen).
 
@@ -308,10 +310,25 @@ Was nur Windows zeigen kann (Oberfläche, appcmd, icacls, robocopy, Firewall, Wi
 
 - **appcmd statt WebAdministration** – das Modul lädt nicht überall zuverlässig und gar nicht unter PowerShell 7. Argumente für appcmd bleiben wie bisher (`/userName:""` muss unverändert ankommen); alle anderen Programme bekommen ihre Argumente nach den Regeln von `CommandLineToArgvW` maskiert.
 - **Programme ohne Fenster** über `System.Diagnostics.Process`, Ausgabe von `php.exe`/`psql` als UTF-8, Standardeingabe als UTF-8 ohne BOM direkt in den Datenstrom, immer geschlossen.
-- **Upload-Grenze** je Website (`requestLimits.maxAllowedContentLength` per appcmd in der applicationHost.config): kennt die Vorlage `uploads.audio_max_mb` (seit `CONFIG_VERSION` 6, Audio-Transkription D5), dann `max(uploads.max_mb, uploads.audio_max_mb) × 1 048 576 + 10 485 760` Bytes (300 MB → 325 058 560), sonst wie bisher `uploads.max_mb + 1 MB` (Rahmen einer multipart-Anfrage). Die Audio-Grenze kommt aus der vorhandenen `config.php`, sonst aus `info` (`uploads_audio_max_mb`), sonst aus der `config.example.php` (Standard 300). „Prüfen“ zeigt beide Werte und die Bytes; die php.ini-Warnung vergleicht mit dem größeren Wert. Ein höherer gültiger Wert wird nie gesenkt. Nicht in `public\web.config` – die überschreibt jedes Update.
+- **Upload-Grenze** je Website (`requestLimits.maxAllowedContentLength` per appcmd in der applicationHost.config): kennt die Vorlage `uploads.audio_max_mb` (seit `CONFIG_VERSION` 6, Audio-Transkription D5), dann `max(uploads.max_mb, uploads.audio_max_mb) × 1 048 576 + 10 485 760` Bytes (300 MB → 325 058 560), sonst wie bisher `uploads.max_mb + 1 MB` (Rahmen einer multipart-Anfrage). Die Audio-Grenze kommt aus der vorhandenen `config.php`, sonst aus `info` (`uploads_audio_max_mb`), sonst aus der `config.example.php` (Standard 300). „Prüfen“ zeigt beide Werte und die Bytes; die php.ini-Warnung vergleicht mit dem größeren Wert. Mit `anfrageMinMb` aus dem Katalog (werner 48) zählt dieser Wert mit: `max(anfrageMinMb, max_mb, audio_max_mb) × 1 MiB + 10 MiB`. Ein höherer gültiger Wert wird nie gesenkt. Nicht in `public\web.config` – die überschreibt jedes Update.
 - **Prüfen vor Ändern:** Die ZIP wird schon auf „Prüfen“ entpackt, damit Aufbau und `requirements` (`php_min`, `postgres_min`, `extensions` aus `config/app.php`) feststehen, bevor etwas angelegt wird. Version (und Name) des Programmcodes für „Neuinstallation, Version …“ bzw. „Aktualisieren: alt -> neu“ kommen aus `config/projekt/app.php` (Literal-Array `name`/`version`/`description`, überschreibt `config/app.php`), falls es die Datei gibt, sonst wie bisher aus `version` in `config/app.php`.
 - **Pfade ohne Laufwerksprüfung** (`[IO.Path]::Combine` statt `Join-Path`): ein Datenordner auf einem fehlenden Laufwerk wird gemeldet statt abzustürzen.
 - **Abbrechen:** „Fenster schließen“ während eines Schritts hält nach diesem Schritt an und schließt dann; ein laufendes Programm wird nicht hart beendet. Beim nächsten Lauf ist jeder Schritt wiederholbar; das DB-Passwort kommt dann aus der schon geschriebenen `config.php`.
+
+## Server-Werte für KI über das DMS
+
+Programme mit `auth.mode = dms` rufen KI nur über werner auf (Vorlage `docs/03`, „KI im Betrieb über das DMS“). Was SNAIL dafür tut (seit 7.8):
+
+| Wert | werner | Programme | SNAIL |
+|---|---|---|---|
+| FastCGI `activityTimeout`/`requestTimeout` | ≥ 960 s | ≥ 960 s | Schritt „IIS: FastCGI-Zeitlimits“ bei der **Neuinstallation** (nicht fatal): *.php-Handler der Website → FastCGI-Anwendung (`fullPath` + `arguments`) → Werte unter 960 s auf 960 s anheben, nie senken (IIS-Standard ohne Eintrag: 30/90 s). IIS kennt die Werte nur je FastCGI-Anwendung, sie gelten deshalb für **alle** Websites dieser `php-cgi.exe` |
+| `maxAllowedContentLength` | ≥ max(48, `max_mb`, `audio_max_mb`) | ≥ max(`max_mb`, `audio_max_mb`) | Katalogfeld `anfrageMinMb` (werner 48), Rechnung siehe „Was intern passiert“ |
+| `memory_limit` | ≥ 512 MB | ≥ 256 MB | nur Hinweis auf „Prüfen“ (Katalogfeld `memoryMinMb`); die Anwendungen heben es für große Aufrufe per `ini_set` selbst an. Kein Wert je Website – dafür bräuchte IIS je Wert eine eigene FastCGI-Anwendung (`php-cgi.exe` mit `-d memory_limit=…`) und Handler je Website, und `windows-pruefung.ps1` läse dann die falsche Anwendung |
+| `post_max_size`/`upload_max_filesize` | ≥ 48 MB und ≥ Upload-Grenzen | ≥ Upload-Grenzen | Hinweis auf „Prüfen“ gegen den größten Wert (WIPP setzt 520M/512M) |
+| `max_input_time` | -1 | -1 | Hinweis auf „Prüfen“, wenn nicht -1 (WIPP setzt es) |
+| `max_execution_time` | Vorgabe | Vorgabe | nichts (die Anwendungen setzen es je Aufruf) |
+
+`memory_limit` und `max_input_time` liest SNAIL mit `php.exe`; das ist dieselbe php.ini wie für `php-cgi.exe`, wenn beide im selben Ordner liegen (prüft `windows-pruefung.ps1`). Der Vertrag mit den Projekten (`services.json`, Konsolenausgaben, `config.example.php`) bleibt unverändert.
 
 ## Sicherheitshinweise
 
