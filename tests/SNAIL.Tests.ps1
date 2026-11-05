@@ -1113,6 +1113,17 @@ Test-Case 'Upload-Grenze mit Mindestwert des Katalogs (werner 48 MB), Bedarf fue
     Assert-Equal ([long](250 * 1048576 + 10485760)) (Get-UploadLimitBytes -MaxMb 250 -MinMb 48)
     Assert-Equal 48 (Get-UploadNeedMb -MaxMb 25 -MinMb 48); Assert-Equal 300 (Get-UploadNeedMb -MaxMb 25 -AudioMaxMb 300 -MinMb 48); Assert-Equal 25 (Get-UploadNeedMb -MaxMb 25)
 }
+Test-Case 'Format-UploadLimitLog: alle vier Faelle (mit/ohne Audio, mit/ohne Mindestwert) und hoeherer Wert' {
+    Assert-Equal 'Upload-Grenze der Website: 27262976 Bytes (26 MB, uploads.max_mb = 25)' (Format-UploadLimitLog -Bytes 27262976 -MaxMb 25)
+    Assert-Equal 'Upload-Grenze der Website: 325058560 Bytes (310 MB, uploads.max_mb = 25, uploads.audio_max_mb = 300)' (Format-UploadLimitLog -Bytes 325058560 -MaxMb 25 -AudioMaxMb 300)
+    Assert-Equal 'Upload-Grenze der Website: 60817408 Bytes (58 MB, uploads.max_mb = 25, Mindestwert 48 MB)' (Format-UploadLimitLog -Bytes 60817408 -MaxMb 25 -MinMb 48)
+    Assert-Equal 'Upload-Grenze der Website: 325058560 Bytes (310 MB, uploads.max_mb = 25, uploads.audio_max_mb = 300, Mindestwert 48 MB)' (Format-UploadLimitLog -Bytes 325058560 -MaxMb 25 -AudioMaxMb 300 -MinMb 48)
+    Assert-Equal 'Upload-Grenze der Website: 2000000000 Bytes (1907 MB, uploads.max_mb = 25, Mindestwert 48 MB, hoeherer Wert der Website bleibt)' (Format-UploadLimitLog -Bytes 2000000000 -MaxMb 25 -MinMb 48 -KeptHigher $true)
+}
+Test-Case 'Skript: kein "-f ... + ..." ohne Klammern (Komma bindet staerker als +, -f wirft dann)' {
+    $hits = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.BinaryExpressionAst] -and @('Plus', 'Minus') -contains [string]$n.Operator -and $n.Left -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$n.Left.Operator -eq 'Format' }, $true))
+    Assert-Equal 0 $hits.Count (($hits | ForEach-Object { "Zeile $($_.Extent.StartLineNumber)" }) -join ', ')
+}
 Test-Case 'php.ini-Hinweise: memory_limit gegen Mindestwert, -1 unbegrenzt, max_input_time -1; nur ASCII' {
     Assert-Equal 0 @(Get-PhpServerWarnings -Memory '512M' -MaxInputTime '-1' -MemoryMinMb 512).Count
     Assert-Equal 0 @(Get-PhpServerWarnings -Memory '-1' -MaxInputTime '-1' -MemoryMinMb 512).Count 'unbegrenzt'
