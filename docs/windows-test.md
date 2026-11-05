@@ -260,18 +260,17 @@ Braucht eine projektvorlage mit `uploads.audio_max_mb` in der `config.example.ph
 
 ## 16 Server-Werte für KI über das DMS (SNAIL 7.8)
 
-`$fcgi` meint `$appcmd list config -section:system.webServer/fastCgi`.
+FastCGI-Zeitlimits (960 s) und `memory_limit` (512M) setzt **WIPP** global; SNAIL prüft nur. `$fcgi` meint `$appcmd list config -section:system.webServer/fastCgi`.
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 16.1 | Vorher: `$fcgi` | Werte `activityTimeout`/`requestTimeout` der `php-cgi.exe` notieren (fehlen sie: IIS-Standard 30/90 s) |
-| 16.2 | Neuinstallation werner (Katalog „werner“) → „Prüfen“ | ℹ Upload-Grenze „… -> IIS maxAllowedContentLength …“ und „Mindestwert des Katalogs fuer werner: 48 MB (KI-Routen)“; ℹ FastCGI „… werden auf mindestens 960 s angehoben …“; ⚠ PHP „memory_limit … mindestens 512M …“, falls die php.ini weniger hat; ⚠ „max_input_time …“, falls nicht -1 |
-| 16.3 | „Installieren“ | Schritt „IIS: FastCGI-Zeitlimits (>= 960 s, KI ueber das DMS)“ ✓; Protokoll „FastCGI …php-cgi.exe: activityTimeout X -> 960 s, requestTimeout Y -> 960 s …“ bzw. „… reicht“ |
-| 16.4 | `$fcgi` | beide Werte ≥ 960 (ein vorher höherer Wert bleibt); `environmentVariables` und andere Attribute unverändert |
+| 16.1 | `$fcgi` | Werte `activityTimeout`/`requestTimeout` der `php-cgi.exe` notieren (mit aktuellem WIPP 960/960; fehlen sie: IIS-Standard 30/90 s) |
+| 16.2 | Neuinstallation werner (Katalog „werner“) → „Prüfen“ | ℹ Upload-Grenze „… -> IIS maxAllowedContentLength …“ und „Mindestwert des Katalogs fuer werner: 48 MB (KI-Routen)“; ✓ FastCGI „…php-cgi.exe: activityTimeout 960 s, requestTimeout 960 s (>= 960 s).“ (darunter ⚠ „… mindestens 960 s (setzt WIPP global …)“); ⚠ PHP „memory_limit … mindestens 512M …“, falls die php.ini weniger hat; ⚠ „max_input_time …“, falls nicht -1 |
+| 16.3 | „Installieren“ | **kein** Schritt zu FastCGI; `$fcgi` vorher = nachher (SNAIL ändert nichts Globales) |
+| 16.4 | Gegenprobe: `$appcmd set config -section:system.webServer/fastCgi "/[fullPath='<php-cgi.exe>'].requestTimeout:600" /commit:apphost` → werner „Einrichtung wiederholen“ → „Prüfen“, danach Wert zurück auf 960 | ⚠ FastCGI „… requestTimeout 600 s - fuer KI ueber das DMS mindestens 960 s …“; der Lauf ändert den Wert nicht |
 | 16.5 | `$appcmd list config werner -section:system.webServer/security/requestFiltering` (werner mit `max_mb` 25, ohne Audio-Schlüssel) | `maxAllowedContentLength="60817408"` (= 48 MiB + 10 MiB); mit `audio_max_mb` 300: 325058560 |
-| 16.6 | Neuinstallation eines Programms (z. B. Projektvorlage, Mandant `ki`) | FastCGI-Schritt meldet „… reicht (>= 960 s)“; Upload-Grenze ohne Mindestwert wie bisher; ⚠ memory_limit erst unter 256M |
-| 16.7 | Update bzw. „Einrichtung wiederholen“ | **kein** Schritt „FastCGI-Zeitlimits“ (nur Neuinstallation) |
-| 16.8 | `tools\windows-pruefung.ps1` von werner | Zeile „FastCGI: activityTimeout 960 s, requestTimeout 960 s …“, keine Warnung zu requestTimeout |
+| 16.6 | Neuinstallation eines Programms (z. B. Projektvorlage, Mandant `ki`) → „Prüfen“ | Upload-Grenze ohne Mindestwert wie bisher; ⚠ memory_limit erst unter 256M |
+| 16.7 | `tools\windows-pruefung.ps1` von werner | Zeile „FastCGI: activityTimeout 960 s, requestTimeout 960 s …“, keine Warnung zu den Zeitlimits |
 
 ## Ergebnis festhalten
 

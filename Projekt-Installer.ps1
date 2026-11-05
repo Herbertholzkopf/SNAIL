@@ -1720,9 +1720,9 @@ function Get-UploadNeedMb {
 <#
  FastCGI (KI ueber das DMS): werner und die Programme warten bis 930 s auf
  einen KI-Aufruf, deshalb activityTimeout/requestTimeout >= 960 s. IIS kennt
- die Werte nur je FastCGI-Anwendung (fullPath + arguments) - sie gelten fuer
- alle Websites, die diese php-cgi.exe nutzen. SNAIL hebt sie bei einer
- Neuinstallation nur an, senkt nie. IIS-Standard ohne Eintrag: 30 / 90 s.
+ die Werte nur je FastCGI-Anwendung (fullPath + arguments), sie gelten fuer
+ alle Websites dieser php-cgi.exe - deshalb setzt sie WIPP global, SNAIL
+ prueft nur ("Pruefen"). IIS-Standard ohne Eintrag: 30 / 90 s.
 #>
 $script:FastCgiMinTimeout = 960
 
@@ -1736,15 +1736,6 @@ function ConvertFrom-AppCmdAdds {
         $list.Add($h)
     }
     return $list.ToArray()
-}
-
-# scriptProcessor des *.php-Handlers -> FullPath und Arguments (Teil nach "|")
-function Get-PhpHandlerProcessor {
-    param([string]$HandlersText)
-    $h = @(ConvertFrom-AppCmdAdds $HandlersText | Where-Object { $_['path'] -eq '*.php' -and $_['scriptProcessor'] }) | Select-Object -First 1
-    if (-not $h) { return $null }
-    $parts = ([string]$h['scriptProcessor']) -split '\|', 2
-    return [pscustomobject]@{ FullPath = $parts[0]; Arguments = $(if ($parts.Count -gt 1) { $parts[1] } else { '' }) }
 }
 
 # Zeitlimits der FastCGI-Anwendung (fehlt das Attribut: IIS-Standard)
@@ -1762,32 +1753,20 @@ function Get-FastCgiTimeouts {
     return $null
 }
 
-# appcmd-Argumente zum Anheben (nur Attribute, die unter dem Mindestwert liegen)
-function Get-FastCgiTimeoutArgs {
-    param([Parameter(Mandatory)][string]$FullPath, [string]$Arguments = '', [Parameter(Mandatory)]$Current, [int]$Seconds = $script:FastCgiMinTimeout)
-    if ($FullPath -match "'" -or $Arguments -match "'") { throw "FastCGI-Pfad mit Apostroph wird nicht unterstuetzt: $FullPath" }
-    $key = if ($Arguments) { "[fullPath='$FullPath',arguments='$Arguments']" } else { "[fullPath='$FullPath']" }
-    $set = @()
-    if ($Current.Activity -lt $Seconds) { $set += "/$key.activityTimeout:$Seconds" }
-    if ($Current.Request -lt $Seconds) { $set += "/$key.requestTimeout:$Seconds" }
-    if ($set.Count -eq 0) { return @() }
-    return @(@('set', 'config', '-section:system.webServer/fastCgi') + $set + @('/commit:apphost'))
-}
-
-# Schritt "FastCGI-Zeitlimits" (nur Neuinstallation): Handler der Website -> Anwendung -> anheben
-function Set-FastCgiTimeouts {
-    param([Parameter(Mandatory)]$Plan)
-    $r = Invoke-AppCmd @('list', 'config', $Plan.Ordner, '-section:system.webServer/handlers')
-    $proc = Get-PhpHandlerProcessor ($r.Lines -join "`n")
-    if (-not $proc) { throw "Kein *.php-Handler fuer die Website '$($Plan.Ordner)' gefunden - FastCGI-Zeitlimits nicht geprueft." }
-    $r = Invoke-AppCmd @('list', 'config', '-section:system.webServer/fastCgi')
-    $cur = Get-FastCgiTimeouts -FastCgiText ($r.Lines -join "`n") -FullPath $proc.FullPath -Arguments $proc.Arguments
-    if (-not $cur) { throw "FastCGI-Anwendung $($proc.FullPath) nicht gefunden - Zeitlimits nicht geprueft." }
-    $set = @(Get-FastCgiTimeoutArgs -FullPath $proc.FullPath -Arguments $proc.Arguments -Current $cur)
-    if ($set.Count -eq 0) { return ("FastCGI {0}: activityTimeout {1} s, requestTimeout {2} s - reicht (>= {3} s)." -f $proc.FullPath, $cur.Activity, $cur.Request, $script:FastCgiMinTimeout) }
-    $r = Invoke-AppCmd $set
-    if ($r.ExitCode -ne 0) { throw "FastCGI-Zeitlimits konnten nicht gesetzt werden: $($r.Output)" }
-    return ("FastCGI {0}: activityTimeout {1} -> {2} s, requestTimeout {3} -> {4} s (gilt fuer alle Websites mit dieser php-cgi.exe)." -f $proc.FullPath, $cur.Activity, [math]::Max($cur.Activity, $script:FastCgiMinTimeout), $cur.Request, [math]::Max($cur.Request, $script:FastCgiMinTimeout))
+# Hinweis fuer "Pruefen": Zeitlimits der FastCGI-Anwendung von php-cgi.exe neben
+# php.exe (ohne Argumente, wie WIPP sie anlegt) unter dem Mindestwert?
+function Get-FastCgiTimeoutCheck {
+    param([string]$FastCgiText, [Parameter(Mandatory)][string]$PhpExe, [int]$Seconds = $script:FastCgiMinTimeout)
+    # String statt Split-Path: gleiches Ergebnis unter Windows, und die Tests laufen unter Linux
+    $pos = $PhpExe.LastIndexOfAny([char[]]@('\', '/'))
+    $cgi = if ($pos -ge 0) { $PhpExe.Substring(0, $pos + 1) + 'php-cgi.exe' } else { 'php-cgi.exe' }
+    $t = Get-FastCgiTimeouts -FastCgiText $FastCgiText -FullPath $cgi
+    if (-not $t) { return [pscustomobject]@{ Level = 'Info'; Text = "Keine FastCGI-Anwendung fuer $cgi gefunden - Zeitlimits nicht geprueft (WIPP legt sie an)." } }
+    $txt = "FastCGI $cgi`: activityTimeout $($t.Activity) s, requestTimeout $($t.Request) s"
+    if ($t.Activity -lt $Seconds -or $t.Request -lt $Seconds) {
+        return [pscustomobject]@{ Level = 'Warn'; Text = "$txt - fuer KI ueber das DMS mindestens $Seconds s (setzt WIPP global; sonst brechen lange KI-Aufrufe ab)." }
+    }
+    return [pscustomobject]@{ Level = 'Ok'; Text = "$txt (>= $Seconds s)." }
 }
 
 <#
@@ -3465,7 +3444,12 @@ function Test-Installation {
     $reqMin = [int]$inst.Service.RequestMinMb
     $limit = Get-UploadLimitBytes -MaxMb $inst.UploadsMaxMb -AudioMaxMb $audioMb -MinMb $reqMin
     if ($reqMin -gt 0) { & $add 'Info' 'Upload-Grenze' ("Mindestwert des Katalogs fuer {0}: {1} MB (KI-Routen)" -f $inst.Service.Name, $reqMin) }
-    if ($isNew) { & $add 'Info' 'FastCGI' ("activityTimeout/requestTimeout der php-cgi.exe werden auf mindestens {0} s angehoben, falls niedriger (gilt fuer alle Websites dieser PHP-Installation, KI ueber das DMS)." -f $script:FastCgiMinTimeout) }
+    if ($php -and (Test-Path -LiteralPath $script:AppCmd)) {
+        try {
+            $fc = Get-FastCgiTimeoutCheck -FastCgiText ((Invoke-AppCmd @('list', 'config', '-section:system.webServer/fastCgi')).Lines -join "`n") -PhpExe $php
+            & $add $fc.Level 'FastCGI' $fc.Text
+        } catch { }
+    }
     if ($null -ne $audioMb) {
         & $add 'Info' 'Upload-Grenze' ("uploads.max_mb {0} MB, uploads.audio_max_mb {1} MB -> IIS maxAllowedContentLength {2} Bytes (ein hoeherer Wert der Website bleibt)" -f $inst.UploadsMaxMb, $audioMb, $limit)
     } else {
@@ -3647,9 +3631,6 @@ function Get-StepPlan {
     $s.Add(@{ Key = 'code';     Title = $codeTitle; Fatal = $true })
     $s.Add(@{ Key = 'folders';  Title = 'Datenordner Data, Cache, Logs, Temp'; Fatal = $true })
     $s.Add(@{ Key = 'iis';      Title = 'IIS: App-Pool, Website, Upload-Grenze'; Fatal = $true })
-    if ($Plan.Kind -eq 'new') {
-        $s.Add(@{ Key = 'fastcgi'; Title = 'IIS: FastCGI-Zeitlimits (>= 960 s, KI ueber das DMS)'; Fatal = $false })
-    }
     $s.Add(@{ Key = 'acl';      Title = 'Rechte: Programm-, Daten-, Gemeinsamer Ordner'; Fatal = $true })
     if ($Plan.Kind -eq 'new' -and $Plan.Inst.Firewall) {
         $s.Add(@{ Key = 'firewall'; Title = 'Firewallregel (im Netzwerk erreichbar)'; Fatal = $true })
@@ -3766,7 +3747,6 @@ function Invoke-Installation {
                     }
                     'folders'  { New-DataFolders -Plan $Plan }
                     'iis'      { Set-ProjectSite -Plan $Plan }
-                    'fastcgi'  { Write-Log (Set-FastCgiTimeouts -Plan $Plan) 'Ok' }
                     'acl'      { Set-ProjectAcls -Plan $Plan }
                     'firewall' { Set-ProjectFirewallRule -Plan $Plan }
                     'db' {

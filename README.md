@@ -321,14 +321,14 @@ Programme mit `auth.mode = dms` rufen KI nur über werner auf (Vorlage `docs/03`
 
 | Wert | werner | Programme | SNAIL |
 |---|---|---|---|
-| FastCGI `activityTimeout`/`requestTimeout` | ≥ 960 s | ≥ 960 s | Schritt „IIS: FastCGI-Zeitlimits“ bei der **Neuinstallation** (nicht fatal): *.php-Handler der Website → FastCGI-Anwendung (`fullPath` + `arguments`) → Werte unter 960 s auf 960 s anheben, nie senken (IIS-Standard ohne Eintrag: 30/90 s). IIS kennt die Werte nur je FastCGI-Anwendung, sie gelten deshalb für **alle** Websites dieser `php-cgi.exe` |
+| FastCGI `activityTimeout`/`requestTimeout` | ≥ 960 s | ≥ 960 s | **setzt WIPP** global (IIS kennt die Werte nur je FastCGI-Anwendung, sie gelten für alle Websites dieser `php-cgi.exe`); SNAIL zeigt sie auf „Prüfen“ für die `php-cgi.exe` neben `php.exe` und warnt unter 960 s (IIS-Standard ohne Eintrag: 30/90 s) |
 | `maxAllowedContentLength` | ≥ max(48, `max_mb`, `audio_max_mb`) | ≥ max(`max_mb`, `audio_max_mb`) | Katalogfeld `anfrageMinMb` (werner 48), Rechnung siehe „Was intern passiert“ |
-| `memory_limit` | ≥ 512 MB | ≥ 256 MB | nur Hinweis auf „Prüfen“ (Katalogfeld `memoryMinMb`); die Anwendungen heben es für große Aufrufe per `ini_set` selbst an. Kein Wert je Website – dafür bräuchte IIS je Wert eine eigene FastCGI-Anwendung (`php-cgi.exe` mit `-d memory_limit=…`) und Handler je Website, und `windows-pruefung.ps1` läse dann die falsche Anwendung |
+| `memory_limit` | ≥ 512 MB | ≥ 256 MB | **setzt WIPP** global (512M in der php.ini); SNAIL nur Hinweis auf „Prüfen“ (Katalogfeld `memoryMinMb`), die Anwendungen heben es für große Aufrufe per `ini_set` selbst an. Kein Wert je Website – dafür bräuchte IIS je Wert eine eigene FastCGI-Anwendung (`php-cgi.exe` mit `-d memory_limit=…`) und Handler je Website, und `windows-pruefung.ps1` läse dann die falsche Anwendung |
 | `post_max_size`/`upload_max_filesize` | ≥ 48 MB und ≥ Upload-Grenzen | ≥ Upload-Grenzen | Hinweis auf „Prüfen“ gegen den größten Wert (WIPP setzt 520M/512M) |
 | `max_input_time` | -1 | -1 | Hinweis auf „Prüfen“, wenn nicht -1 (WIPP setzt es) |
 | `max_execution_time` | Vorgabe | Vorgabe | nichts (die Anwendungen setzen es je Aufruf) |
 
-`memory_limit` und `max_input_time` liest SNAIL mit `php.exe`; das ist dieselbe php.ini wie für `php-cgi.exe`, wenn beide im selben Ordner liegen (prüft `windows-pruefung.ps1`). Der Vertrag mit den Projekten (`services.json`, Konsolenausgaben, `config.example.php`) bleibt unverändert.
+`memory_limit` und `max_input_time` liest SNAIL mit `php.exe`; das ist dieselbe php.ini wie für `php-cgi.exe`, wenn beide im selben Ordner liegen (prüft `windows-pruefung.ps1`). Globale IIS- und PHP-Werte gehören zu WIPP, SNAIL ändert sie nicht. Der Vertrag mit den Projekten (`services.json`, Konsolenausgaben, `config.example.php`) bleibt unverändert.
 
 ## Sicherheitshinweise
 

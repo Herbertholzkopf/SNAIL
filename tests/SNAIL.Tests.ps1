@@ -1074,14 +1074,6 @@ Test-Case 'Get-DbCtypeCandidates: Ausgabe von PostgreSQL 18.6 unter Windows (msv
 
 # =============================================================================
 Write-Host "`n== Server-Werte fuer KI ueber das DMS (FastCGI, Upload-Grenze, php.ini)"
-$handlersOut = @'
-<system.webServer>
-  <handlers accessPolicy="Read, Script">
-    <add name="PHP_via_FastCGI" path="*.php" verb="*" modules="FastCgiModule" scriptProcessor="C:\Program Files\PHP\php-cgi.exe" resourceType="Either" requireAccess="Script" />
-    <add name="StaticFile" path="*" verb="*" modules="StaticFileModule" resourceType="Either" requireAccess="Read" />
-  </handlers>
-</system.webServer>
-'@
 $fastCgiOut = @'
 <system.webServer>
   <fastCgi>
@@ -1095,12 +1087,7 @@ $fastCgiOut = @'
   </fastCgi>
 </system.webServer>
 '@
-Test-Case 'FastCGI: Handler und Anwendung aus der appcmd-Ausgabe, Standardwerte, Argumente unterscheiden' {
-    $p = Get-PhpHandlerProcessor $handlersOut
-    Assert-Equal 'C:\Program Files\PHP\php-cgi.exe' $p.FullPath; Assert-Equal '' $p.Arguments
-    $p2 = Get-PhpHandlerProcessor ($handlersOut -replace 'php-cgi.exe"', 'php-cgi.exe|-d memory_limit=512M"')
-    Assert-Equal '-d memory_limit=512M' $p2.Arguments
-    Assert ($null -eq (Get-PhpHandlerProcessor '<handlers><add name="x" path="*" /></handlers>')) 'ohne *.php'
+Test-Case 'FastCGI: Zeitlimits aus der appcmd-Ausgabe, Argumente unterscheiden, IIS-Standard' {
     $t = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\Program Files\PHP\php-cgi.exe'
     Assert-Equal 600 $t.Activity; Assert-Equal 900 $t.Request
     $t2 = Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\Program Files\PHP\php-cgi.exe' -Arguments '-d memory_limit=512M'
@@ -1109,15 +1096,15 @@ Test-Case 'FastCGI: Handler und Anwendung aus der appcmd-Ausgabe, Standardwerte,
     Assert-Equal 30 $t3.Activity 'IIS-Standard activityTimeout'; Assert-Equal 90 $t3.Request 'IIS-Standard requestTimeout'
     Assert ($null -eq (Get-FastCgiTimeouts -FastCgiText $fastCgiOut -FullPath 'C:\gibts\php-cgi.exe')) 'unbekannt'
 }
-Test-Case 'FastCGI: appcmd-Argumente nur zum Anheben, nie senken' {
-    $a = Get-FastCgiTimeoutArgs -FullPath 'C:\Program Files\PHP\php-cgi.exe' -Current ([pscustomobject]@{ Activity = 600; Request = 900 })
-    Assert-Equal "set|config|-section:system.webServer/fastCgi|/[fullPath='C:\Program Files\PHP\php-cgi.exe'].activityTimeout:960|/[fullPath='C:\Program Files\PHP\php-cgi.exe'].requestTimeout:960|/commit:apphost" ($a -join '|')
-    $b = Get-FastCgiTimeoutArgs -FullPath 'C:\PHP\php-cgi.exe' -Arguments '-d x=1' -Current ([pscustomobject]@{ Activity = 1200; Request = 300 })
-    Assert-Equal "set|config|-section:system.webServer/fastCgi|/[fullPath='C:\PHP\php-cgi.exe',arguments='-d x=1'].requestTimeout:960|/commit:apphost" ($b -join '|') 'nur requestTimeout'
-    Assert-Equal 0 @(Get-FastCgiTimeoutArgs -FullPath 'C:\PHP\php-cgi.exe' -Current ([pscustomobject]@{ Activity = 960; Request = 3600 })).Count 'reicht -> nichts'
-    $threw = $false
-    try { Get-FastCgiTimeoutArgs -FullPath "C:\P'HP\php-cgi.exe" -Current ([pscustomobject]@{ Activity = 1; Request = 1 }) | Out-Null } catch { $threw = $true }
-    Assert $threw 'Apostroph abgelehnt'
+Test-Case 'FastCGI-Hinweis auf Pruefen: unter 960 s Warnung, sonst OK, fehlt -> Info; SNAIL setzt nichts (WIPP)' {
+    $w = Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'C:\Program Files\PHP\php.exe'
+    Assert-Equal 'Warn' $w.Level; Assert ($w.Text -match 'activityTimeout 600 s, requestTimeout 900 s' -and $w.Text -match '960') $w.Text
+    $ok = Get-FastCgiTimeoutCheck -FastCgiText ($fastCgiOut -replace 'activityTimeout="600" requestTimeout="900"', 'activityTimeout="960" requestTimeout="3600"') -PhpExe 'C:\Program Files\PHP\php.exe'
+    Assert-Equal 'Ok' $ok.Level $ok.Text
+    Assert-Equal 'Warn' (Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'D:\PHP84\php.exe').Level 'IIS-Standard 30/90'
+    Assert-Equal 'Info' (Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'E:\x\php.exe').Level 'keine Anwendung'
+    foreach ($x in @($w.Text, $ok.Text)) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
+    Assert (-not (Get-Command Set-FastCgiTimeouts -ErrorAction SilentlyContinue)) 'kein Schritt, der FastCGI setzt'
 }
 Test-Case 'Upload-Grenze mit Mindestwert des Katalogs (werner 48 MB), Bedarf fuer php.ini' {
     Assert-Equal ([long](26 * 1048576)) (Get-UploadLimitBytes -MaxMb 25) 'ohne Mindestwert und Audio wie bisher'
