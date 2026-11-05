@@ -117,6 +117,31 @@ Test-Case 'ConvertTo-CmdArg: Rundreise ueber php (Leerzeichen, ", Backslash am E
     Assert-Equal $werte @($out | ConvertFrom-Json)
 }
 
+Test-Case 'ConvertFrom-MixedOutput: UTF-8 bleibt, ANSI-Zeilen von libpq (1252) lesbar, gemischt, leer' {
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $u = [string][char]0x00FC; $a = [string][char]0x00E4; $q1 = [string][char]0x201E; $q2 = [string][char]0x201C
+    $msgDe = 'Verbindung zum Server auf ' + $q1 + '127.0.0.1' + $q2 + ', Port 5432 fehlgeschlagen: L' + $a + 'uft der Server?'
+    $data = 'J' + [char]0x00F6 + 'rg M' + $u + 'ller'
+    # Bytes wie psql sie schreibt: Daten UTF-8, libpq-Meldung in Codepage 1252 (hier als Rueckfall uebergeben)
+    $cp = $null
+    try { $cp = [System.Text.Encoding]::GetEncoding(1252) } catch { }
+    if ($null -eq $cp) {
+        # ohne Codepage 1252 (Linux ohne Provider): Latin-1 als Stellvertreter, ohne die typografischen Anfuehrungszeichen
+        $cp = $latin1; $msgDe = $msgDe.Replace($q1, '"').Replace($q2, '"')
+    }
+    $bytes = [byte[]](@([System.Text.Encoding]::UTF8.GetBytes($data + "`r`n")) + @($cp.GetBytes($msgDe + "`n")))
+    $r = ConvertFrom-MixedOutput -Text $latin1.GetString($bytes) -Fallback $cp
+    $lines = $r -split "`r?`n"
+    Assert-Equal $data $lines[0] 'UTF-8-Zeile'
+    Assert-Equal $msgDe $lines[1] 'ANSI-Zeile'
+    Assert ($r.IndexOf([char]0xFFFD) -lt 0) 'kein Ersatzzeichen'
+    Assert-Equal 'nur ASCII' (ConvertFrom-MixedOutput -Text 'nur ASCII')
+    Assert-Equal '' (ConvertFrom-MixedOutput -Text '')
+    # Gegenprobe: so sah es vorher aus (ANSI als UTF-8 gelesen)
+    $vorher = (New-Object System.Text.UTF8Encoding($false)).GetString($cp.GetBytes($msgDe))
+    Assert ($vorher.IndexOf([char]0xFFFD) -ge 0) 'Gegenprobe: UTF-8 allein liefert Ersatzzeichen'
+}
+
 # =============================================================================
 Write-Host "`n== Katalog (projekte.json)"
 Test-Case 'Katalog im Repository: ohne Fehler, Logos als Dateien, keine Installationen' {

@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.8**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.8.1**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -309,7 +309,7 @@ Was nur Windows zeigen kann (Oberfläche, appcmd, icacls, robocopy, Firewall, Wi
 ## Was intern passiert
 
 - **appcmd statt WebAdministration** – das Modul lädt nicht überall zuverlässig und gar nicht unter PowerShell 7. Argumente für appcmd bleiben wie bisher (`/userName:""` muss unverändert ankommen); alle anderen Programme bekommen ihre Argumente nach den Regeln von `CommandLineToArgvW` maskiert.
-- **Programme ohne Fenster** über `System.Diagnostics.Process`, Ausgabe von `php.exe`/`psql` als UTF-8, Standardeingabe als UTF-8 ohne BOM direkt in den Datenstrom, immer geschlossen.
+- **Programme ohne Fenster** über `System.Diagnostics.Process`, Ausgabe von `php.exe` als UTF-8, von `psql`/`pg_dump` zeilenweise UTF-8 oder – für Meldungen von libpq selbst, die unter Windows in der ANSI-Codepage kommen – Codepage des Systems (seit 7.8.1, vorher erschienen Umlaute als „?“), Standardeingabe als UTF-8 ohne BOM direkt in den Datenstrom, immer geschlossen.
 - **Upload-Grenze** je Website (`requestLimits.maxAllowedContentLength` per appcmd in der applicationHost.config): kennt die Vorlage `uploads.audio_max_mb` (seit `CONFIG_VERSION` 6, Audio-Transkription D5), dann `max(uploads.max_mb, uploads.audio_max_mb) × 1 048 576 + 10 485 760` Bytes (300 MB → 325 058 560), sonst wie bisher `uploads.max_mb + 1 MB` (Rahmen einer multipart-Anfrage). Die Audio-Grenze kommt aus der vorhandenen `config.php`, sonst aus `info` (`uploads_audio_max_mb`), sonst aus der `config.example.php` (Standard 300). „Prüfen“ zeigt beide Werte und die Bytes; die php.ini-Warnung vergleicht mit dem größeren Wert. Mit `anfrageMinMb` aus dem Katalog (werner 48) zählt dieser Wert mit: `max(anfrageMinMb, max_mb, audio_max_mb) × 1 MiB + 10 MiB`. Ein höherer gültiger Wert wird nie gesenkt. Nicht in `public\web.config` – die überschreibt jedes Update.
 - **Prüfen vor Ändern:** Die ZIP wird schon auf „Prüfen“ entpackt, damit Aufbau und `requirements` (`php_min`, `postgres_min`, `extensions` aus `config/app.php`) feststehen, bevor etwas angelegt wird. Version (und Name) des Programmcodes für „Neuinstallation, Version …“ bzw. „Aktualisieren: alt -> neu“ kommen aus `config/projekt/app.php` (Literal-Array `name`/`version`/`description`, überschreibt `config/app.php`), falls es die Datei gibt, sonst wie bisher aus `version` in `config/app.php`.
 - **Pfade ohne Laufwerksprüfung** (`[IO.Path]::Combine` statt `Join-Path`): ein Datenordner auf einem fehlenden Laufwerk wird gemeldet statt abzustürzen.

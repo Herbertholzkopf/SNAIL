@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.8
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.8.1
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -135,7 +135,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.8'
+$script:AppVersion = '7.8.1'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -299,8 +299,36 @@ function ConvertTo-CmdArgs {
                   wartet kein Programm auf eine Eingabe, die nie kommt
    -Environment   Umgebungsvariablen nur fuer diesen Kindprozess (PGPASSFILE);
                   $null entfernt eine geerbte Variable
-   -Utf8Output    Ausgabe als UTF-8 lesen (php.exe, psql)
+   -Utf8Output    Ausgabe als UTF-8 lesen (php.exe)
+   -MixedOutput   zeilenweise UTF-8 oder ANSI-Codepage (psql, pg_dump)
 #>
+<#
+ Ausgabe von psql/pg_dump: Zeilen vom Server (Daten, Meldungen mit
+ PGCLIENTENCODING=UTF8) kommen als UTF-8, Meldungen von libpq selbst
+ (z. B. "Verbindung zum Server ... fehlgeschlagen") unter Windows in der
+ ANSI-Codepage (deutsch 1252) - als UTF-8 gelesen wurden daraus "?".
+ $Text: mit Latin-1 gelesene Bytes. Je Zeile: gueltiges UTF-8 -> UTF-8,
+ sonst ANSI-Codepage des Systems (Rueckfall Latin-1).
+#>
+function ConvertFrom-MixedOutput {
+    param([AllowEmptyString()][string]$Text, $Fallback = $null)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $strict = New-Object System.Text.UTF8Encoding($false, $true)
+    if ($null -eq $Fallback) {
+        try { $Fallback = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage) } catch { $Fallback = $latin1 }
+    }
+    $parts = $Text -split "`n"
+    $outParts = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $parts) {
+        $bytes = $latin1.GetBytes($p)
+        $line = $null
+        try { $line = $strict.GetString($bytes) } catch { $line = $Fallback.GetString($bytes) }
+        $outParts.Add($line)
+    }
+    return ($outParts -join "`n")
+}
+
 function Invoke-ExeCapture {
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -309,6 +337,7 @@ function Invoke-ExeCapture {
         [string]$WorkingDirectory = '',
         [hashtable]$Environment = @{},
         [switch]$Utf8Output,
+        [switch]$MixedOutput,
         [int]$TimeoutSec = 600
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -327,6 +356,12 @@ function Invoke-ExeCapture {
     if ($Utf8Output) {
         $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $psi.StandardErrorEncoding  = New-Object System.Text.UTF8Encoding($false)
+    }
+    if ($MixedOutput) {
+        # Bytes unveraendert lesen (Latin-1 bildet jedes Byte auf ein Zeichen ab),
+        # danach zeilenweise UTF-8 oder ANSI (ConvertFrom-MixedOutput)
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(28591)
+        $psi.StandardErrorEncoding  = [System.Text.Encoding]::GetEncoding(28591)
     }
 
     $proc = New-Object System.Diagnostics.Process
@@ -361,6 +396,7 @@ function Invoke-ExeCapture {
         $proc.WaitForExit()
         $out = [string]$outTask.Result
         $err = [string]$errTask.Result
+        if ($MixedOutput) { $out = ConvertFrom-MixedOutput $out; $err = ConvertFrom-MixedOutput $err }
         [pscustomobject]@{
             ExitCode = [int]$proc.ExitCode
             Output   = $out
@@ -2394,7 +2430,7 @@ function Invoke-PgTool {
         $esc = $Password.Replace('\', '\\').Replace(':', '\:')
         Write-SecretFile -Path $pass -Text ("*:{0}:*:{1}:{2}`n" -f $Pg.Port, $Pg.Superuser, $esc)
         $all = @('-h', '127.0.0.1', '-p', [string]$Pg.Port, '-U', $Pg.Superuser, '-w') + $Arguments
-        return (Invoke-ExeCapture -FilePath $exe -ArgumentList (ConvertTo-CmdArgs $all) -StdIn $StdIn -Utf8Output -TimeoutSec $TimeoutSec -Environment @{
+        return (Invoke-ExeCapture -FilePath $exe -ArgumentList (ConvertTo-CmdArgs $all) -StdIn $StdIn -MixedOutput -TimeoutSec $TimeoutSec -Environment @{
             PGPASSFILE        = $pass
             PGPASSWORD        = $null     # eine geerbte Variable haette Vorrang
             PGCONNECT_TIMEOUT = '10'
