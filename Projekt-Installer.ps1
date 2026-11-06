@@ -3109,15 +3109,27 @@ function Get-DmsPlan {
         $res.Hints = $hints.ToArray()
         return $res
     }
-    $dmsList = @($Instances | Where-Object { -not $_.Error -and $_.AuthMode -eq 'provider' -and $_.Key -ceq $Target.Key -and $_.Ordner -ne $Target.Ordner })
+    # DMS des Mandanten: Dienste mit anmeldestelle im Katalog zuerst
+    $catDms = @($Catalog | Where-Object { $_.IsDms } | ForEach-Object { [string]$_.Key })
+    $found = @($Instances | Where-Object { -not $_.Error -and $_.AuthMode -eq 'provider' -and $_.Key -ceq $Target.Key -and $_.Ordner -ne $Target.Ordner })
+    $dmsList = @(@($found | Where-Object { $catDms -contains $_.ServiceKey }) + @($found | Where-Object { $catDms -notcontains $_.ServiceKey }))
+    # nicht lesbare Installation, die nach dem DMS dieses Mandanten aussieht (Ordner <dms> bzw. <dms>-<mandant>)
+    foreach ($b in @($Instances | Where-Object { $_.Error -and $_.Ordner -ne $Target.Ordner })) {
+        foreach ($k in $catDms) {
+            if ($b.Ordner -ieq $k -or $b.Ordner -ieq ("{0}-{1}" -f $k, $Target.Key)) {
+                $hints.Add(@{ Level = 'Warn'; Text = ("Installation {0} ist nicht lesbar ({1}) - ist es das DMS dieses Mandanten, erst dort den Fehler beheben, sonst bleibt die Anmeldung ueber das DMS aus." -f $b.Ordner, $b.Error) })
+            }
+        }
+    }
     if ($own) {
         if ($own.AuthMode -eq 'dms') {
             $res.Role = 'dms'
-            $res.Dms = @($dmsList | Where-Object { $_.ServiceKey -ceq $own.AuthDmsService }) + $dmsList | Select-Object -First 1
+            # nur das eingetragene DMS (auth.dms_service), kein Rueckfall auf ein anderes
+            $res.Dms = if ($own.AuthDmsService) { @($dmsList | Where-Object { $_.ServiceKey -ceq $own.AuthDmsService }) | Select-Object -First 1 } else { $dmsList | Select-Object -First 1 }
             if ($res.Dms) {
                 $hints.Add(@{ Level = 'Ok'; Text = ("Anmeldung ueber das DMS {0} ({1}): Programm-Token bleibt, wenn check es annimmt; sonst neu im Ordner des DMS." -f $res.Dms.Display, $res.Dms.Ordner) })
             } else {
-                $hints.Add(@{ Level = 'Warn'; Text = ("Das Programm meldet sich ueber das DMS '{0}' an, das DMS dieses Mandanten ist auf diesem Server aber nicht zu finden - check wird scheitern." -f $own.AuthDmsService) })
+                $hints.Add(@{ Level = 'Warn'; Text = ("Das Programm meldet sich ueber das DMS '{0}' an, dieses DMS ist fuer den Mandanten auf diesem Server aber nicht zu finden (ein anderes DMS wird nicht verwendet) - check wird scheitern." -f $own.AuthDmsService) })
             }
         } elseif ($dmsList.Count -gt 0) {
             $hints.Add(@{ Level = 'Info'; Text = ("Das Programm meldet sich lokal an; das DMS {0} ist da. Umstellen auf das DMS ist ein bewusster Schritt - SNAIL stellt vorhandene Programme nicht um." -f $dmsList[0].Display) })
@@ -3134,6 +3146,9 @@ function Get-DmsPlan {
     } else {
         $res.Role = 'dms'
         $res.Dms = $dmsList[0]
+        if ($dmsList.Count -gt 1) {
+            $hints.Add(@{ Level = 'Warn'; Text = ("Mehrere DMS fuer den Mandanten '{0}': {1} - verwendet wird {2}." -f $Target.Key, (($dmsList | ForEach-Object { $_.Ordner }) -join ', '), $res.Dms.Ordner) })
+        }
         $hints.Add(@{ Level = 'Ok'; Text = ("Anmeldung ueber das DMS {0} ({1}): auth.mode dms, Programm-Token per api:token im Ordner des DMS, Notfallkonto 'notfall'." -f $res.Dms.Display, $res.Dms.Ordner) })
     }
     $res.Hints = $hints.ToArray()
@@ -3151,18 +3166,47 @@ function New-DmsProgramToken {
     $a = @($console, 'api:token', $Service, $Installation)
     if ($Name) { $a += "--name=$Name" }
     Write-Log ("php bin\console api:token {0} {1} im Ordner des DMS {2}" -f $Service, $Installation, $Dms.ProgDir)
-    $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs $a) -WorkingDirectory $Dms.ProgDir -Utf8Output -TimeoutSec 120
-    $errLines = @(([string]$r.Error) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
-    foreach ($l in $errLines) { Write-Log ('  ' + $l.Trim()) }
-    if ($r.ExitCode -ne 0) {
-        throw ("api:token im DMS fehlgeschlagen (Exit-Code {0}): {1}" -f $r.ExitCode, $(if ($errLines.Count -gt 0) { $errLines[-1].Trim() } else { 'siehe Protokoll' }))
+    $maybe = ' Im DMS kann trotzdem ein neues Token ausgestellt und das bisherige damit ungueltig sein (php bin\console api:tokens im DMS); "Einrichtung wiederholen" erzeugt dann ein neues.'
+    try {
+        $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs $a) -WorkingDirectory $Dms.ProgDir -Utf8Output -TimeoutSec 120
+    } catch {
+        throw ("api:token im DMS: {0}{1}" -f $_.Exception.Message, $maybe)
     }
-    $out = @(([string]$r.Output) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
-    if ($out.Count -ne 1 -or $out[0].Trim() -cnotmatch $script:ProgramTokenPattern) {
-        throw 'api:token lieferte kein Programm-Token (erwartet genau eine Zeile pt1_..., 47 Zeichen) - nichts uebernommen.'
+    $errLines = @(([string]$r.Error) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+    foreach ($l in $errLines) { Write-Log ('  ' + (Hide-ProgramToken $l.Trim())) }
+    if ($r.ExitCode -ne 0) {
+        throw ("api:token im DMS fehlgeschlagen (Exit-Code {0}): {1}" -f $r.ExitCode, $(if ($errLines.Count -gt 0) { Hide-ProgramToken $errLines[-1].Trim() } else { 'siehe Protokoll' }))
+    }
+    $sel = Select-ProgramTokenLine -Output ([string]$r.Output)
+    foreach ($l in $sel.Others) { Write-Log ('  api:token, weitere Ausgabe auf stdout: ' + $l) 'Warn' }
+    if (-not $sel.Token) {
+        throw ("api:token lieferte {0} - nichts uebernommen.{1}" -f $(if ($sel.Count -gt 1) { 'mehrere Zeilen im Format pt1_...' } else { 'keine Zeile im Format pt1_... (47 Zeichen)' }), $maybe)
     }
     Write-Log ("Programm-Token fuer {0}/{1} im DMS erzeugt (Wert nur in config.php und Zugangsdatei)." -f $Service, $Installation) 'Ok'
-    return $out[0].Trim()
+    return $sel.Token
+}
+
+# Token-artige Teile einer Zeile unkenntlich machen (fuer Protokoll und Meldungen)
+function Hide-ProgramToken {
+    param([AllowEmptyString()][string]$Text)
+    return ([string]$Text -creplace 'pt1_[A-Za-z0-9_-]+', 'pt1_***')
+}
+
+<#
+ stdout von api:token: genau eine Zeile soll das Token sein. Eine Zeile mit BOM
+ oder Leerraum zaehlt (TrimStart BOM, Trim). Andere Zeilen (z. B. eine PHP-
+ Deprecation auf STDOUT) gehen als Warnung ins Protokoll - token-artige Teile
+ darin unkenntlich. Token nur, wenn genau eine Zeile passt.
+#>
+function Select-ProgramTokenLine {
+    param([AllowEmptyString()][string]$Output)
+    $hits = @(); $others = @()
+    foreach ($l in @(([string]$Output) -split "`r?`n")) {
+        $t = $l.TrimStart([char]0xFEFF).Trim()
+        if ($t -eq '') { continue }
+        if ($t -cmatch $script:ProgramTokenPattern) { $hits += $t } else { $others += (Hide-ProgramToken $t) }
+    }
+    return [pscustomobject]@{ Token = $(if ($hits.Count -eq 1) { $hits[0] } else { '' }); Count = $hits.Count; Others = $others }
 }
 
 # Zeile "Anmeldung ueber das DMS (...)" aus der Ausgabe von check bewerten
@@ -3197,7 +3241,18 @@ function Update-DmsProgramToken {
     else {
         $c = Invoke-ConsoleCheck -Plan $Plan
         $st = Get-DmsCheckState -Items $c.Items
-        if ($st.TokenProblem) { $why = 'wird vom DMS abgelehnt' }
+        if ($st.TokenProblem) {
+            # Bevor ein (vielleicht gueltiges) Token entwertet wird: fragt das Programm
+            # wirklich dieses DMS, und kennt das DMS das Token als widerrufen/ersetzt?
+            $guard = Test-DmsTokenRenewal -Plan $Plan -Config $cfg -Token $old
+            if (-not $guard.Renew) {
+                $res.Status = 'kept'
+                $res.Text = 'Programm-Token bleibt unveraendert, obwohl check es ablehnt: ' + $guard.Text
+                $res | Add-Member -NotePropertyName Warn -NotePropertyValue $true -Force
+                return $res
+            }
+            $why = 'wird vom DMS abgelehnt (' + $guard.Text + ')'
+        }
         else {
             $res.Text = 'Programm-Token vorhanden und vom DMS angenommen - bleibt unveraendert.'
             if ($st.Found -and -not $st.Ok) { $res.Text = 'Programm-Token vorhanden - bleibt unveraendert (check: ' + $st.Text + ').' }
@@ -3215,9 +3270,94 @@ function Update-DmsProgramToken {
         $res.Text = "Programm-Token neu erzeugt ($why) und in die config.php eingetragen. Vorheriger Stand: $($e.Backup)"
     } catch {
         $res.Status = 'manual'
-        $res.Text = "Neues Programm-Token erzeugt ($why), aber nicht in die config.php eingetragen: $($_.Exception.Message) Das alte ist ungueltig - das neue steht in der Zugangsdatei und auf 'Fertig' (auth.program_token von Hand eintragen)."
+        $res.Text = "Neues Programm-Token erzeugt ($why), aber nicht in die config.php eingetragen: $($_.Exception.Message) Das alte ist ungueltig - das neue steht in der Zugangsdatei (program_token); als auth.program_token von Hand in die config.php eintragen, dann Einrichtung wiederholen."
     }
     return $res
+}
+
+<#
+ Lehnt check das Token ab (401), kann die Antwort auch von einer anderen
+ Anwendung kommen (local_url des DMS veraltet, Port inzwischen vergeben) -
+ ein neues Token wuerde dann bei jedem Lauf ein gueltiges entwerten. Deshalb
+ nur erneuern, wenn
+   1. das Programm das DMS unter http://localhost:<Port des DMS>/ anspricht
+      (auth.dms_url, sonst local_url bzw. url aus der services.json) und
+   2. "api:tokens" im DMS kein aktives Token mit derselben Kennung (erste 8
+      Zeichen, kein Geheimnis) fuer dieses Programm fuehrt.
+#>
+function Test-DmsTokenRenewal {
+    param([Parameter(Mandatory)]$Plan, $Config, [string]$Token = '')
+    $base = Get-ProgramDmsBase -Config $Config -ServicesJson $Plan.ServicesJson -DmsService ([string]$Plan.Dms.ServiceKey) -InstKey ([string]$Plan.Inst.Key)
+    $expect = if ($Plan.Dms.Port -gt 0) { "http://localhost:$($Plan.Dms.Port)/" } else { '' }
+    $v = Compare-DmsBase -Base $base -Expected $expect
+    if (-not $v.Same) { return [pscustomobject]@{ Renew = $false; Text = $v.Text } }
+    $list = Get-DmsTokenList -Dms $Plan.Dms -PhpExe $Plan.PhpExe
+    $d = Get-DmsTokenDecision -List $list -Service ([string]$Plan.Inst.Service.Key) -InstKey ([string]$Plan.Inst.Key) -Token $Token
+    return [pscustomobject]@{ Renew = $d.Renew; Text = $d.Text }
+}
+
+# Adresse, unter der das Programm das DMS anspricht (wie CoreClient der Vorlage):
+# auth.dms_url, sonst local_url, sonst url des DMS-Eintrags der services.json
+function Get-ProgramDmsBase {
+    param($Config, [string]$ServicesJson, [string]$DmsService, [string]$InstKey)
+    if ($Config -and $Config.auth -and [string]$Config.auth.dms_url) { return [string]$Config.auth.dms_url }
+    $tree = $null
+    try { $tree = Read-ServicesJson -Path $ServicesJson } catch { return '' }
+    foreach ($sv in @($tree['services'])) {
+        if ($sv -isnot [System.Collections.IDictionary] -or [string]$sv['key'] -cne $DmsService) { continue }
+        foreach ($x in @($sv['installations'])) {
+            if ($x -is [System.Collections.IDictionary] -and [string]$x['key'] -ceq $InstKey) {
+                if ([string]$x['local_url']) { return [string]$x['local_url'] }
+                return [string]$x['url']
+            }
+        }
+    }
+    return ''
+}
+
+function Compare-DmsBase {
+    param([string]$Base = '', [string]$Expected = '')
+    if (-not $Expected) { return [pscustomobject]@{ Same = $false; Text = 'Port des DMS unbekannt (IIS-Binding) - Ablehnung nicht pruefbar, kein neues Token.' } }
+    if (-not $Base) { return [pscustomobject]@{ Same = $false; Text = 'DMS nicht in der services.json - kein neues Token (erst das DMS einrichten bzw. wiederholen).' } }
+    $n = { param($u) ([string]$u).Trim().TrimEnd('/').ToLowerInvariant() -replace '^http://127\.0\.0\.1:', 'http://localhost:' }
+    if ((& $n $Base) -ne (& $n $Expected)) {
+        return [pscustomobject]@{ Same = $false; Text = ("local_url/Adresse des DMS veraltet: das Programm fragt {0}, das DMS laeuft unter {1} - kein neues Token (die Ablehnung kommt vermutlich nicht vom DMS). In der services.json local_url korrigieren, dann wiederholen." -f $Base, $Expected) }
+    }
+    return [pscustomobject]@{ Same = $true; Text = '' }
+}
+
+# api:tokens im DMS (ohne Geheimnisse); $null, wenn nicht lesbar
+function Get-DmsTokenList {
+    param([Parameter(Mandatory)]$Dms, [Parameter(Mandatory)][string]$PhpExe)
+    $console = Join-Path (Join-Path $Dms.ProgDir 'bin') 'console'
+    try {
+        $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @($console, 'api:tokens')) -WorkingDirectory $Dms.ProgDir -Utf8Output -TimeoutSec 60
+        if ($r.ExitCode -ne 0) { return $null }
+        return @(([string]$r.Output) -split "`r?`n")
+    } catch { return $null }
+}
+
+<#
+ Ausgabe von api:tokens: "[aktiv]      <dienst> <installation> <kennung> erzeugt ..."
+ (Kennung = erste 8 Zeichen + Auslassungszeichen). Erneuern, wenn fuer dieses
+ Programm kein aktives Token oder ein aktives mit anderer Kennung gefuehrt wird.
+ Liste nicht lesbar: erneuern (die Adresse ist dann schon geprueft).
+#>
+function Get-DmsTokenDecision {
+    param($List, [Parameter(Mandatory)][string]$Service, [Parameter(Mandatory)][string]$InstKey, [string]$Token = '')
+    if ($null -eq $List) { return [pscustomobject]@{ Renew = $true; Text = 'api:tokens im DMS nicht lesbar' } }
+    $mine = $(if ($Token.Length -ge 8) { $Token.Substring(0, 8) } else { '' })
+    $active = @()
+    foreach ($l in @($List)) {
+        if ($l -match '^\[(aktiv|widerrufen)\]\s+(\S+)\s+(\S+)\s+(\S+)') {
+            if ($Matches[1] -eq 'aktiv' -and $Matches[2] -ceq $Service -and $Matches[3] -ceq $InstKey) { $active += $Matches[4] }
+        }
+    }
+    if ($active.Count -eq 0) { return [pscustomobject]@{ Renew = $true; Text = 'im DMS kein aktives Token fuer dieses Programm' } }
+    if ($mine -and @($active | Where-Object { $_.StartsWith($mine) }).Count -gt 0) {
+        return [pscustomobject]@{ Renew = $false; Text = 'das DMS fuehrt dieses Token als aktiv - die Ablehnung kommt vermutlich nicht vom DMS (local_url, Proxy?). Kein neues Token.' }
+    }
+    return [pscustomobject]@{ Renew = $true; Text = 'im DMS ist ein anderes Token aktiv' }
 }
 
 # local_url (Vertrag services.json, seit A5) fuer eine vorhandene Installation setzen, falls sie fehlt
@@ -4101,8 +4241,10 @@ function Invoke-Installation {
                             $t = Update-DmsProgramToken -Plan $Plan
                             $script:Result.DmsToken = $t
                             if ($t.Generated) { $script:Result.CredFile = Save-InstallCredentials -Plan $Plan -Values @{ program_token = $t.Value } }
-                            Write-Log $t.Text $(if ($t.Status -eq 'manual') { 'Warn' } else { 'Ok' })
+                            $isWarn = ($t.PSObject.Properties['Warn'] -and $t.Warn)
+                            Write-Log $t.Text $(if ($t.Status -eq 'manual' -or $isWarn) { 'Warn' } else { 'Ok' })
                             if ($t.Status -eq 'manual') { $rows.Add(@{ Level = 'Error'; Name = 'Programm-Token'; Text = $t.Text }); $state = 'Failed' }
+                            elseif ($isWarn) { $rows.Add(@{ Level = 'Warn'; Name = 'Programm-Token'; Text = $t.Text }); $state = 'Warn' }
                         }
                     }
                     'migrate' {
@@ -5028,8 +5170,9 @@ function Get-FinishAccess {
             $lines.Add(("Prog.-Token: {0}   ({1})" -f $mask, $(if ($dt.Status -eq 'manual') { 'NICHT eingetragen - von Hand als auth.program_token eintragen' } else { 'im DMS erzeugt, in config.php und Zugangsdatei' })))
             $secrets.Add([pscustomobject]@{ Label = 'Programm-Token'; Value = [string]$dt.Value })
         } else {
-            $lines.Add('Prog.-Token: vorhanden, vom DMS angenommen (unveraendert)')
+            $lines.Add($(if ($dt.PSObject.Properties['Warn'] -and $dt.Warn) { 'Prog.-Token: vorhanden, unveraendert (check lehnt es ab - siehe Hinweise unten)' } else { 'Prog.-Token: vorhanden, vom DMS angenommen (unveraendert)' }))
         }
+        if ($dt.Backup) { $lines.Add(("Vorher     : {0}   (config.php vor dem neuen Programm-Token, enthaelt das DB-Passwort)" -f $dt.Backup)) }
     }
     if ($ak.Key -and @('new', 'added', 'manual') -contains $ak.Status) {
         $secrets.Add([pscustomobject]@{ Label = $(if ($ak.Status -eq 'manual') { 'app.key (Vorschlag)' } else { 'app.key' }); Value = [string]$ak.Key })

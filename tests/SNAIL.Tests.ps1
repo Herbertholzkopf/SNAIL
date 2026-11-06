@@ -1212,6 +1212,57 @@ Test-Case 'Get-DmsPlan: DMS = provider; Programm mit DMS im Mandanten = dms; ohn
     Assert $catalog.Services['werner'].IsDms 'Katalog: werner ist die Anmeldestelle'
     Assert (-not $catalog.Services['projekt'].IsDms)
 }
+Test-Case 'Get-DmsPlan: kein Rueckfall auf ein anderes DMS, mehrere DMS -> Katalog-DMS mit Warnung, unlesbares DMS -> Warnung' {
+    $p = Get-DmsPlan -Target (New-A5Target 'renate' 'muster' (New-A5Instance 'renate' 'renate' 'muster' 'dms' 'altdms')) -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'dms' $p.Role; Assert ($null -eq $p.Dms) 'werner wird nicht ersatzweise genommen'
+    Assert (@($p.Hints | Where-Object { $_.Level -eq 'Warn' -and $_.Text -match 'anderes DMS wird nicht verwendet' }).Count -eq 1) (($p.Hints | ForEach-Object { $_.Text }) -join ' | ')
+    $two = @((New-A5Instance 'zweit' 'zweit' 'muster' 'provider'), (New-A5Instance 'werner' 'werner' 'muster' 'provider'))
+    $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'muster') -Instances $two -Catalog $catalog.ServiceList
+    Assert-Equal 'werner' $p.Dms.Ordner 'Katalog-DMS bevorzugt'
+    Assert (@($p.Hints | Where-Object { $_.Text -match 'Mehrere DMS' }).Count -eq 1) 'Warnung bei mehreren'
+    $broken = @((New-A5Instance 'werner-x' '' '' 'local' '' 'php bin\console info: kaputt'))
+    $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'x') -Instances $broken -Catalog $catalog.ServiceList
+    Assert-Equal 'local' $p.Role
+    Assert (@($p.Hints | Where-Object { $_.Level -eq 'Warn' -and $_.Text -match 'werner-x ist nicht lesbar' }).Count -eq 1) (($p.Hints | ForEach-Object { $_.Text }) -join ' | ')
+}
+Test-Case 'api:token-Ausgabe: Token mit BOM/Leerraum, weitere stdout-Zeilen als Warnung (unkenntlich), keine oder mehrere -> kein Token' {
+    $tok = 'pt1_' + ('a' * 21) + '-_' + ('B' * 20)
+    Assert-Equal 47 $tok.Length
+    $r = Select-ProgramTokenLine -Output ([string][char]0xFEFF + $tok + "`r`n")
+    Assert-Equal $tok $r.Token 'BOM vor der Zeile'
+    $r = Select-ProgramTokenLine -Output ("PHP Deprecated:  something in x.php on line 3`n  $tok  `n")
+    Assert-Equal $tok $r.Token 'Deprecation-Zeile davor'
+    Assert-Equal 1 @($r.Others).Count; Assert ($r.Others[0] -match 'Deprecated') $r.Others[0]
+    $r = Select-ProgramTokenLine -Output ("Hinweis $tok`n")
+    Assert-Equal '' $r.Token 'Token nur als ganze Zeile'
+    Assert (-not ($r.Others -join ' ').Contains($tok)) 'unkenntlich in den weiteren Zeilen'
+    $r = Select-ProgramTokenLine -Output ("$tok`n" + 'pt1_' + ('c' * 43) + "`n")
+    Assert-Equal '' $r.Token; Assert-Equal 2 $r.Count 'mehrere -> keines'
+    Assert-Equal '' (Select-ProgramTokenLine -Output '').Token
+    Assert-Equal 'x pt1_*** y' (Hide-ProgramToken "x $tok y")
+}
+Test-Case 'Vor dem Erneuern: Adresse des DMS und api:tokens (Kennung) pruefen' {
+    Assert (Compare-DmsBase -Base 'http://localhost:21100/' -Expected 'http://localhost:21100/').Same
+    Assert (Compare-DmsBase -Base 'http://127.0.0.1:21100' -Expected 'http://localhost:21100/').Same '127.0.0.1 und ohne Schraegstrich'
+    $v = Compare-DmsBase -Base 'http://localhost:21099/' -Expected 'http://localhost:21100/'
+    Assert (-not $v.Same -and $v.Text -match 'veraltet') $v.Text
+    Assert (-not (Compare-DmsBase -Base '' -Expected 'http://localhost:1/').Same) 'nicht in services.json'
+    Assert (-not (Compare-DmsBase -Base 'http://localhost:1/' -Expected '').Same) 'Port unbekannt'
+    $tok = 'pt1_AbCdefghijklmnopqrstuvwxyz0123456789ABCDEFG'
+    $list = @('[aktiv]     renate               muster               pt1_AbCd' + [char]0x2026 + '    erzeugt 06.11.2026 09:00, zuletzt genutzt nie',
+              '[widerrufen] olaf                muster               pt1_Zzzz' + [char]0x2026 + '    erzeugt 01.11.2026 09:00, zuletzt genutzt nie')
+    Assert (-not (Get-DmsTokenDecision -List $list -Service 'renate' -InstKey 'muster' -Token $tok).Renew) 'DMS fuehrt das Token als aktiv -> nicht erneuern'
+    Assert (Get-DmsTokenDecision -List $list -Service 'renate' -InstKey 'muster' -Token ('pt1_XyZw' + ('q' * 39))).Renew 'anderes aktiv -> erneuern'
+    Assert (Get-DmsTokenDecision -List $list -Service 'olaf' -InstKey 'muster' -Token $tok).Renew 'nur widerrufen -> erneuern'
+    Assert (Get-DmsTokenDecision -List @('Keine Programm-Tokens.') -Service 'renate' -InstKey 'muster' -Token $tok).Renew 'keins'
+    Assert (Get-DmsTokenDecision -List $null -Service 'renate' -InstKey 'muster' -Token $tok).Renew 'nicht lesbar'
+    $sjt = Join-Path $tmp 'a5-base.json'
+    [System.IO.File]::WriteAllText($sjt, '{"format":1,"services":[{"key":"werner","name":"werner","installations":[{"key":"muster","name":"M","url":"https://w.example/","local_url":"http://localhost:21100/"},{"key":"x","name":"X","url":"https://x.example/"}]}]}')
+    Assert-Equal 'http://localhost:21100/' (Get-ProgramDmsBase -Config $null -ServicesJson $sjt -DmsService 'werner' -InstKey 'muster')
+    Assert-Equal 'https://x.example/' (Get-ProgramDmsBase -Config $null -ServicesJson $sjt -DmsService 'werner' -InstKey 'x') 'ohne local_url: url'
+    Assert-Equal 'http://localhost:9/' (Get-ProgramDmsBase -Config ([pscustomobject]@{ auth = [pscustomobject]@{ dms_url = 'http://localhost:9/' } }) -ServicesJson $sjt -DmsService 'werner' -InstKey 'muster') 'dms_url zuerst'
+    Assert-Equal '' (Get-ProgramDmsBase -Config $null -ServicesJson $sjt -DmsService 'gibts' -InstKey 'muster')
+}
 Test-Case 'Get-DmsCheckState: echte check-Zeilen (OK, Token abgelehnt, Token fehlt, DMS fehlt in services.json, nicht erreichbar)' {
     $u = [string][char]0x00FC
     $ok = ConvertFrom-CheckOutput @("[OK     ] Anmeldung $($u)ber das DMS (werner): erreichbar, Programm-Token g$($u)ltig")
@@ -1526,6 +1577,20 @@ if (-not $PgPassword) {
             $log = $script:LogLines -join "`n"
             Assert (-not $log.Contains($t2.Value) -and -not $log.Contains($script:A5Token)) 'kein Token im Protokoll'
             Assert ($t2.Text -notmatch 'pt1_') 'kein Token in der Meldung'
+            Assert ($t2.Text -match 'kein aktives Token') "Grund aus api:tokens: $($t2.Text)"
+        }
+        Test-Case 'Wiederholen: check lehnt ab, das DMS fuehrt das Token aber als aktiv (gleiche Kennung) -> kein neues Token, Warnung' {
+            $cfgFile = Join-Path $appProg 'config.php'
+            $good = (Read-InstalledConfig -ProgDir $appProg -PhpExe $PhpExe).auth.program_token
+            $fake = $good.Substring(0, 8) + ('Z' * 39)
+            [System.IO.File]::WriteAllText($cfgFile, ([System.IO.File]::ReadAllText($cfgFile)).Replace($good, $fake))
+            $before = [System.IO.File]::ReadAllBytes($cfgFile)
+            $t3 = Update-DmsProgramToken -Plan $appPlan
+            Assert-Equal 'kept' $t3.Status $t3.Text
+            Assert ($t3.Warn -and $t3.Text -match 'als aktiv') $t3.Text
+            Assert-Equal ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($cfgFile))) 'config.php unveraendert'
+            [System.IO.File]::WriteAllText($cfgFile, ([System.IO.File]::ReadAllText($cfgFile)).Replace($fake, $good))
+            Assert (Get-DmsCheckState -Items (Invoke-ConsoleCheck -Plan $appPlan).Items).Ok 'gueltiges Token weiter gueltig'
         }
     } finally {
         if ($server) { try { Stop-Process -Id $server.Id -Force } catch { } }

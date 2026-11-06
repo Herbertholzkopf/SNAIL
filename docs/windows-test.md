@@ -298,6 +298,7 @@ Braucht werner (Katalog „werner“, `anmeldestelle`) und ein zweites Programm 
 | 18.11 | `& $php C:\AK\werner*\bin\console api:token-revoke renate a5` → Renate „Einrichtung wiederholen“ | Schritt Programm-Token ⚠/✓: „Programm-Token wird vom DMS abgelehnt - wird neu erzeugt.“, danach „… neu erzeugt … Vorheriger Stand: …\Sicherung\config.php.vor-snail-<Zeit>“; `check` ✓ „erreichbar, Programm-Token gültig“; „Fertig“ zeigt das neue Token maskiert; Zugangsdatei hat das neue Token |
 | 18.12 | Programm ohne DMS: Katalog „Renate“ → neuer Mandant `ohnedms` → „Installieren“ | ℹ „Kein DMS …“; **kein** Schritt Programm-Token; `'mode' => 'local'` in der config.php; Anmeldung mit `admin` wie bisher |
 | 18.13 | werner stoppen (`$appcmd stop site werner-a5`) → Renate „Einrichtung wiederholen“ → werner wieder starten | `check` meldet ⚠ „DMS nicht erreichbar …“ → Hinweis auf „Fertig“, Lauf endet nicht mit Fehler; Token bleibt (kein api:token im Protokoll) |
+| 18.14 | In `C:\AK\services.json` beim werner-Eintrag `a5` die `local_url` auf einen falschen Port setzen (z. B. 21199) → Renate „Einrichtung wiederholen“ → danach Wert zurück | Schritt Programm-Token ⚠ „… check es ablehnt: local_url/Adresse des DMS veraltet …“ bzw. bei unerreichbarem Port ⚠ „DMS nicht erreichbar“; **kein** `api:token` im Protokoll, `api:tokens` unverändert |
 
 ## Ergebnis festhalten
 
