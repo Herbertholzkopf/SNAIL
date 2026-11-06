@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.8.1**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.9**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -142,6 +142,7 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | `braucht` | – | `["python"]`: SNAIL prüft, dass `python.exe` vorhanden ist (PATH, Registry; WIPP installiert es optional), und trägt den Pfad als `python.exe` in die `config.php` ein, **wenn** die `config.example.php` des Projekts diesen Schlüssel hat. Die Skripte laufen über den Aufgabenplaner der Anwendung (`tasks:run`), nicht als eigene Windows-Aufgaben |
 | `anfrageMinMb` | 0 | kleinste Upload-Grenze der Website in MB, unabhängig von `uploads.max_mb` (werner: **48** für die KI-Routen, siehe [Server-Werte für KI](#server-werte-für-ki-über-das-dms)) |
 | `memoryMinMb` | 256 | `memory_limit`, unter dem „Prüfen“ warnt (werner: **512**) |
+| `anmeldestelle` | false | `true` = das DMS eines Mandanten (werner): `auth.mode = 'provider'`, siehe [Anmeldung über das DMS](#anmeldung-über-das-dms-a5) |
 
 **ZIP und Katalog-Eintrag:** Auf „Prüfen“ warnt SNAIL, wenn die gewählte ZIP nicht zum Eintrag passt – zuerst nach `app.service` in der `config.example.php` der ZIP (die Vorlage selbst: `projekt`, werner: `werner`), sonst nach dem Projektstamm gegen den Namen der vorgeschlagenen ZIP (`zip` `werner-main.zip` → Projektstamm `werner-main`). Beim Aktualisieren gilt dasselbe gegen den installierten Dienst. Es bleibt eine Warnung: Ein Programm kann bewusst aus einer anderen ZIP installiert werden (z. B. die Vorlage als Renate zum Testen).
 
@@ -314,6 +315,19 @@ Was nur Windows zeigen kann (Oberfläche, appcmd, icacls, robocopy, Firewall, Wi
 - **Prüfen vor Ändern:** Die ZIP wird schon auf „Prüfen“ entpackt, damit Aufbau und `requirements` (`php_min`, `postgres_min`, `extensions` aus `config/app.php`) feststehen, bevor etwas angelegt wird. Version (und Name) des Programmcodes für „Neuinstallation, Version …“ bzw. „Aktualisieren: alt -> neu“ kommen aus `config/projekt/app.php` (Literal-Array `name`/`version`/`description`, überschreibt `config/app.php`), falls es die Datei gibt, sonst wie bisher aus `version` in `config/app.php`.
 - **Pfade ohne Laufwerksprüfung** (`[IO.Path]::Combine` statt `Join-Path`): ein Datenordner auf einem fehlenden Laufwerk wird gemeldet statt abzustürzen.
 - **Abbrechen:** „Fenster schließen“ während eines Schritts hält nach diesem Schritt an und schließt dann; ein laufendes Programm wird nicht hart beendet. Beim nächsten Lauf ist jeder Schritt wiederholbar; das DB-Passwort kommt dann aus der schon geschriebenen `config.php`.
+
+## Anmeldung über das DMS (A5)
+
+Seit 7.9, Vertrag in der Vorlage `docs/03`, „Anmeldung über das DMS“. Je Mandant ist das DMS (werner, Katalogfeld `anmeldestelle`) die Anmeldestelle; die anderen Programme desselben Mandanten melden sich darüber an. SNAIL richtet je Lauf **eine** Installation ein – „DMS zuerst“ heißt: Ein Programm wird nur angebunden, wenn das DMS **seines Mandanten** (gleicher Schlüssel `app.installation`, `info` → `auth.mode = provider`) schon auf dem Server ist.
+
+| Rolle | Wann | Was SNAIL tut |
+|---|---|---|
+| DMS (`provider`) | Katalogeintrag mit `anmeldestelle` bzw. `info` meldet `provider` | Neuinstallation: `auth.mode = 'provider'` in die `config.php`; `migrate` – die Zeile „Anmeldestelle eingerichtet …“ steht im Protokoll; `services.json`: `installations[].local_url = http://localhost:<port>/` (bei jedem Lauf). Hat eine vorhandene Installation einen anderen `auth.mode`, nur Hinweis auf „Prüfen“ |
+| Programm (`dms`) | Neuinstallation, das DMS des Mandanten ist da (und die Vorlage kennt den Bereich `auth`) | `auth.mode = 'dms'`, `auth.dms_service` = Dienst des DMS, `auth.dms_url` leer; **Programm-Token** im Ordner des DMS mit `php bin\console api:token <dienst> <installation> --name=<Name>` (stdout: die eine Zeile `pt1_…` (47 Zeichen, auch mit BOM/Leerraum), weitere stdout-Zeilen als Warnung ins Protokoll, token-artige Teile unkenntlich; keine oder mehrere Treffer = Fehler mit dem Hinweis, dass das alte Token schon ungültig sein kann; stderr ins Protokoll) – sofort in die neue `config.php` (`auth.program_token`) und als `program_token` in die Zugangsdatei, auf „Fertig“ nur maskiert; fehlt dem DMS-Eintrag die `local_url`, trägt SNAIL sie nach; Notfallkonto **`notfall`** statt `admin` |
+| Programm, Wiederholen/Aktualisieren | `info` meldet `dms` | Schritt „Anmeldung ueber das DMS: Programm-Token“: ein **gültiges Token bleibt** (Probe mit `check` des Programms) – jeder `api:token`-Aufruf entwertet das alte. Neu nur, wenn es fehlt, das Format nicht stimmt oder das DMS es ablehnt – und bei einer Ablehnung nur, wenn das Programm das DMS wirklich unter `http://localhost:<Port des DMS>/` anspricht (sonst „local_url veraltet“) und `api:tokens` im DMS kein aktives Token mit derselben Kennung führt (sonst kommt die Ablehnung nicht vom DMS); eingetragen wie beim `app.key` (Prüfung, Sicherung `config.php.vor-snail-*`). Scheitert das Eintragen, steht das neue Token in der Zugangsdatei (`program_token`) zum Eintragen von Hand. Ein Programm meldet sich nur über das in `auth.dms_service` eingetragene DMS an – kein Rückfall auf ein anderes; gibt es mehrere DMS im Mandanten, nimmt eine Neuinstallation das aus dem Katalog und warnt |
+| Programm ohne DMS | kein DMS dieses Mandanten am Server | bleibt lokal (`auth.mode` wie in der Vorlage: `local`), ℹ auf „Prüfen“ mit dem Tipp, zuerst das DMS zu installieren. Vorhandene lokale Programme stellt SNAIL nicht um (Vorlage, Punkt 7: bewusster Schritt) |
+
+**Kontrolle:** Der letzte Schritt `check` muss im Programm „Anmeldung über das DMS (…): erreichbar, Programm-Token gültig“ melden; ein Fehler in dieser Zeile stoppt mit ihrem Text, „nicht erreichbar“ ist eine Warnung auf „Fertig“. Das Token kommt nie ins Protokoll, nie auf eine Kommandozeile und nie in eine Meldung (ein Test prüft das über den Parser). Der Vertrag mit den Projekten (Konsolenausgaben, `config.example.php`) bleibt unverändert; neu ist nur das optionale `local_url` in der `services.json` (Format 1).
 
 ## Server-Werte für KI über das DMS
 

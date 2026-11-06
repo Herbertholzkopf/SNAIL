@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.8.1“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.9“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.8.1.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.9.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -278,6 +278,27 @@ FastCGI-Zeitlimits (960 s) und `memory_limit` (512M) setzt **WIPP** global; SNAI
 |---|---|---|
 | 17.1 | Dienst „postgresql-x64-18“ anhalten → SNAIL, Installation wählen → „Prüfen“ (bzw. „Verbindung testen“) | Meldung mit lesbaren Umlauten und Anführungszeichen: „… Verbindung zum Server auf „127.0.0.1“, Port 5432 fehlgeschlagen … Läuft der Server …“ – **keine** „?“ an ihrer Stelle; danach Dienst wieder starten |
 | 17.2 | Neuinstallation mit Umlauten im Admin-Namen (wie 2.4) | Name in der Anwendung weiter richtig („Jörg Müller“) – Daten von psql bleiben UTF-8 |
+
+## 18 Anmeldung über das DMS (A5, SNAIL 7.9)
+
+Braucht werner (Katalog „werner“, `anmeldestelle`) und ein zweites Programm aus der Vorlage (z. B. Katalog „Renate“ mit der projektvorlage-ZIP), beide für den Mandanten `a5` / „A5-Test“. `$sj` meint `Get-Content C:\AK\services.json -Raw | ConvertFrom-Json`.
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 18.1 | Katalog „Renate“ → neuer Mandant `a5` → „Prüfen“ (werner für `a5` noch **nicht** installiert) | ℹ Anmeldung „Kein DMS fuer den Mandanten 'a5' auf diesem Server - das Programm meldet sich lokal an (auth.mode local). Fuer die Anmeldung ueber das DMS zuerst werner fuer diesen Mandanten installieren.“ → **nicht** installieren, „Zur Auswahl“ |
+| 18.2 | Katalog „werner“ → Mandant `a5` → „Prüfen“ → „Installieren“ | ✓ Anmeldung „Anmeldestelle (DMS) fuer den Mandanten 'a5' …“; alle Schritte ✓; Protokoll „Anmeldestelle: Anmeldestelle eingerichtet: 0 aktive(r) Benutzer …“; `Select-String C:\AK\werner-a5\config.php -Pattern "'mode'"` → `'mode' => 'provider'` (bzw. Ordner `werner`, wenn es das erste werner ist) |
+| 18.3 | `$sj.services \| ? key -eq werner \| % installations` | Eintrag `a5` mit `url` und `local_url = http://localhost:<Port von werner>/` |
+| 18.4 | Katalog „Renate“ → Mandant `a5` (aus der Liste) → „Prüfen“ | ✓ Anmeldung „Anmeldung ueber das DMS werner - A5-Test (…): auth.mode dms, Programm-Token per api:token im Ordner des DMS, Notfallkonto 'notfall'.“; ℹ Notfallkonto „'notfall' statt 'admin'“ |
+| 18.5 | „Installieren“ | Schritte ✓ inklusive „Anmeldung ueber das DMS: Programm-Token“ („in diesem Lauf erzeugt“) und `check`; Protokoll „php bin\console api:token renate a5 im Ordner des DMS …“, „Programm-Token fuer renate/a5 im DMS erzeugt (Wert nur in config.php und Zugangsdatei).“ und die check-Zeile „Anmeldung über das DMS (werner): erreichbar, Programm-Token gültig“ |
+| 18.6 | Seite „Fertig“ | „Anmeldung : notfall“ mit Initialpasswort; „Prog.-Token: ******** …“ mit „Anzeigen“/„Kopieren“ (Wert = `program_token` in `zugangsdaten\renate-a5.txt` bzw. `renate.txt`, beginnt mit `pt1_`, 47 Zeichen) |
+| 18.7 | `Select-String C:\ProgramData\SNAIL\snail_*.log -SimpleMatch '<Token>'`; `Select-String C:\AK\renate*\config.php -Pattern "'mode'","'dms_service'","'dms_url'"` | **keine Treffer** im Protokoll; `'mode' => 'dms'`, `'dms_service' => 'werner'`, `'dms_url' => ''` |
+| 18.8 | Renate im Browser öffnen → „Anmelden“ | Weiterleitung zu werner, dort mit einem werner-Benutzer anmelden → zurück in Renate, angemeldet (Name wie in werner); `/login/notfall` mit `notfall` + Initialpasswort geht ebenfalls |
+| 18.9 | `& $php C:\AK\werner*\bin\console api:tokens` | Zeile für `renate`/`a5` aktiv; Kennung notieren |
+| 18.10 | Renate „Einrichtung wiederholen“ | Schritt Programm-Token: „Programm-Token vorhanden und vom DMS angenommen - bleibt unveraendert.“; „Fertig“: „Prog.-Token: vorhanden, vom DMS angenommen (unveraendert)“ **ohne** Anzeigen/Kopieren; `api:tokens` zeigt dieselbe Kennung (kein neues Token); Anmeldung über werner geht weiter |
+| 18.11 | `& $php C:\AK\werner*\bin\console api:token-revoke renate a5` → Renate „Einrichtung wiederholen“ | Schritt Programm-Token ⚠/✓: „Programm-Token wird vom DMS abgelehnt - wird neu erzeugt.“, danach „… neu erzeugt … Vorheriger Stand: …\Sicherung\config.php.vor-snail-<Zeit>“; `check` ✓ „erreichbar, Programm-Token gültig“; „Fertig“ zeigt das neue Token maskiert; Zugangsdatei hat das neue Token |
+| 18.12 | Programm ohne DMS: Katalog „Renate“ → neuer Mandant `ohnedms` → „Installieren“ | ℹ „Kein DMS …“; **kein** Schritt Programm-Token; `'mode' => 'local'` in der config.php; Anmeldung mit `admin` wie bisher |
+| 18.13 | werner stoppen (`$appcmd stop site werner-a5`) → Renate „Einrichtung wiederholen“ → werner wieder starten | `check` meldet ⚠ „DMS nicht erreichbar …“ → Hinweis auf „Fertig“, Lauf endet nicht mit Fehler; Token bleibt (kein api:token im Protokoll) |
+| 18.14 | In `C:\AK\services.json` beim werner-Eintrag `a5` die `local_url` auf einen falschen Port setzen (z. B. 21199) → Renate „Einrichtung wiederholen“ → danach Wert zurück | Schritt Programm-Token ⚠ „… check es ablehnt: local_url/Adresse des DMS veraltet …“ bzw. bei unerreichbarem Port ⚠ „DMS nicht erreichbar“; **kein** `api:token` im Protokoll, `api:tokens` unverändert |
 
 ## Ergebnis festhalten
 
