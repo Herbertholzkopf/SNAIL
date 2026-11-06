@@ -3125,8 +3125,10 @@ function Get-DmsPlan {
         if ($own.AuthMode -eq 'dms') {
             $res.Role = 'dms'
             # nur das eingetragene DMS (auth.dms_service), kein Rueckfall auf ein anderes
-            $res.Dms = if ($own.AuthDmsService) { @($dmsList | Where-Object { $_.ServiceKey -ceq $own.AuthDmsService }) | Select-Object -First 1 } else { $dmsList | Select-Object -First 1 }
-            if ($res.Dms) {
+            $res.Dms = if ($own.AuthDmsService) { @($dmsList | Where-Object { $_.ServiceKey -ceq $own.AuthDmsService }) | Select-Object -First 1 } else { $null }
+            if (-not $own.AuthDmsService) {
+                $hints.Add(@{ Level = 'Warn'; Text = "auth.mode ist dms, auth.dms_service aber leer - SNAIL waehlt kein DMS (in der config.php den Dienst des DMS eintragen, z. B. 'werner'); check wird scheitern." })
+            } elseif ($res.Dms) {
                 $hints.Add(@{ Level = 'Ok'; Text = ("Anmeldung ueber das DMS {0} ({1}): Programm-Token bleibt, wenn check es annimmt; sonst neu im Ordner des DMS." -f $res.Dms.Display, $res.Dms.Ordner) })
             } else {
                 $hints.Add(@{ Level = 'Warn'; Text = ("Das Programm meldet sich ueber das DMS '{0}' an, dieses DMS ist fuer den Mandanten auf diesem Server aber nicht zu finden (ein anderes DMS wird nicht verwendet) - check wird scheitern." -f $own.AuthDmsService) })
@@ -3289,7 +3291,8 @@ function Test-DmsTokenRenewal {
     param([Parameter(Mandatory)]$Plan, $Config, [string]$Token = '')
     $base = Get-ProgramDmsBase -Config $Config -ServicesJson $Plan.ServicesJson -DmsService ([string]$Plan.Dms.ServiceKey) -InstKey ([string]$Plan.Inst.Key)
     $expect = if ($Plan.Dms.Port -gt 0) { "http://localhost:$($Plan.Dms.Port)/" } else { '' }
-    $v = Compare-DmsBase -Base $base -Expected $expect
+    $fromDmsUrl = [bool]($Config -and $Config.auth -and [string]$Config.auth.dms_url)
+    $v = Compare-DmsBase -Base $base -Expected $expect -FromDmsUrl $fromDmsUrl
     if (-not $v.Same) { return [pscustomobject]@{ Renew = $false; Text = $v.Text } }
     $list = Get-DmsTokenList -Dms $Plan.Dms -PhpExe $Plan.PhpExe
     $d = Get-DmsTokenDecision -List $list -Service ([string]$Plan.Inst.Service.Key) -InstKey ([string]$Plan.Inst.Key) -Token $Token
@@ -3316,12 +3319,13 @@ function Get-ProgramDmsBase {
 }
 
 function Compare-DmsBase {
-    param([string]$Base = '', [string]$Expected = '')
+    param([string]$Base = '', [string]$Expected = '', [bool]$FromDmsUrl = $false)
     if (-not $Expected) { return [pscustomobject]@{ Same = $false; Text = 'Port des DMS unbekannt (IIS-Binding) - Ablehnung nicht pruefbar, kein neues Token.' } }
     if (-not $Base) { return [pscustomobject]@{ Same = $false; Text = 'DMS nicht in der services.json - kein neues Token (erst das DMS einrichten bzw. wiederholen).' } }
     $n = { param($u) ([string]$u).Trim().TrimEnd('/').ToLowerInvariant() -replace '^http://127\.0\.0\.1:', 'http://localhost:' }
     if ((& $n $Base) -ne (& $n $Expected)) {
-        return [pscustomobject]@{ Same = $false; Text = ("local_url/Adresse des DMS veraltet: das Programm fragt {0}, das DMS laeuft unter {1} - kein neues Token (die Ablehnung kommt vermutlich nicht vom DMS). In der services.json local_url korrigieren, dann wiederholen." -f $Base, $Expected) }
+        $fix = if ($FromDmsUrl) { 'In der config.php des Programms auth.dms_url korrigieren oder leeren' } else { 'In der services.json local_url des DMS korrigieren' }
+        return [pscustomobject]@{ Same = $false; Text = ("Adresse des DMS veraltet: das Programm fragt {0}{1}, das DMS laeuft unter {2} - kein neues Token (die Ablehnung kommt vermutlich nicht vom DMS). {3}, dann wiederholen." -f $Base, $(if ($FromDmsUrl) { ' (auth.dms_url)' } else { ' (local_url/url der services.json)' }), $Expected, $fix) }
     }
     return [pscustomobject]@{ Same = $true; Text = '' }
 }
@@ -3354,8 +3358,9 @@ function Get-DmsTokenDecision {
         }
     }
     if ($active.Count -eq 0) { return [pscustomobject]@{ Renew = $true; Text = 'im DMS kein aktives Token fuer dieses Programm' } }
-    if ($mine -and @($active | Where-Object { $_.StartsWith($mine) }).Count -gt 0) {
-        return [pscustomobject]@{ Renew = $false; Text = 'das DMS fuehrt dieses Token als aktiv - die Ablehnung kommt vermutlich nicht vom DMS (local_url, Proxy?). Kein neues Token.' }
+    # ordinal: StartsWith ohne Angabe vergleicht unter Windows PowerShell nach Kultur
+    if ($mine -and @($active | Where-Object { $_.StartsWith($mine, [System.StringComparison]::Ordinal) }).Count -gt 0) {
+        return [pscustomobject]@{ Renew = $false; Text = 'das DMS fuehrt dieses Token als aktiv - die Ablehnung kommt vermutlich nicht vom DMS (local_url, Proxy?), oder das Token in der config.php ist unvollstaendig bzw. falsch abgeschrieben: dann im DMS php bin\console api:token-revoke <dienst> und Einrichtung wiederholen. Kein neues Token.' }
     }
     return [pscustomobject]@{ Renew = $true; Text = 'im DMS ist ein anderes Token aktiv' }
 }

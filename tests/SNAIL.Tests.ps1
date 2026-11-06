@@ -1220,6 +1220,9 @@ Test-Case 'Get-DmsPlan: kein Rueckfall auf ein anderes DMS, mehrere DMS -> Katal
     $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'muster') -Instances $two -Catalog $catalog.ServiceList
     Assert-Equal 'werner' $p.Dms.Ordner 'Katalog-DMS bevorzugt'
     Assert (@($p.Hints | Where-Object { $_.Text -match 'Mehrere DMS' }).Count -eq 1) 'Warnung bei mehreren'
+    $p = Get-DmsPlan -Target (New-A5Target 'renate' 'muster' (New-A5Instance 'renate' 'renate' 'muster' 'dms' '')) -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert ($null -eq $p.Dms) 'dms_service leer: kein Rueckfall'
+    Assert (@($p.Hints | Where-Object { $_.Level -eq 'Warn' -and $_.Text -match 'dms_service aber leer' }).Count -eq 1) (($p.Hints | ForEach-Object { $_.Text }) -join ' | ')
     $broken = @((New-A5Instance 'werner-x' '' '' 'local' '' 'php bin\console info: kaputt'))
     $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'x') -Instances $broken -Catalog $catalog.ServiceList
     Assert-Equal 'local' $p.Role
@@ -1245,13 +1248,19 @@ Test-Case 'Vor dem Erneuern: Adresse des DMS und api:tokens (Kennung) pruefen' {
     Assert (Compare-DmsBase -Base 'http://localhost:21100/' -Expected 'http://localhost:21100/').Same
     Assert (Compare-DmsBase -Base 'http://127.0.0.1:21100' -Expected 'http://localhost:21100/').Same '127.0.0.1 und ohne Schraegstrich'
     $v = Compare-DmsBase -Base 'http://localhost:21099/' -Expected 'http://localhost:21100/'
-    Assert (-not $v.Same -and $v.Text -match 'veraltet') $v.Text
+    Assert (-not $v.Same -and $v.Text -match 'veraltet' -and $v.Text -match 'services.json local_url') $v.Text
+    $v2 = Compare-DmsBase -Base 'http://localhost:21099/' -Expected 'http://localhost:21100/' -FromDmsUrl $true
+    Assert ($v2.Text -match 'auth.dms_url korrigieren' -and $v2.Text -notmatch 'services.json local_url') $v2.Text
     Assert (-not (Compare-DmsBase -Base '' -Expected 'http://localhost:1/').Same) 'nicht in services.json'
     Assert (-not (Compare-DmsBase -Base 'http://localhost:1/' -Expected '').Same) 'Port unbekannt'
     $tok = 'pt1_AbCdefghijklmnopqrstuvwxyz0123456789ABCDEFG'
     $list = @('[aktiv]     renate               muster               pt1_AbCd' + [char]0x2026 + '    erzeugt 06.11.2026 09:00, zuletzt genutzt nie',
               '[widerrufen] olaf                muster               pt1_Zzzz' + [char]0x2026 + '    erzeugt 01.11.2026 09:00, zuletzt genutzt nie')
-    Assert (-not (Get-DmsTokenDecision -List $list -Service 'renate' -InstKey 'muster' -Token $tok).Renew) 'DMS fuehrt das Token als aktiv -> nicht erneuern'
+    $dk = Get-DmsTokenDecision -List $list -Service 'renate' -InstKey 'muster' -Token $tok
+    Assert (-not $dk.Renew) 'DMS fuehrt das Token als aktiv -> nicht erneuern'
+    Assert ($dk.Text -match 'falsch abgeschrieben' -and $dk.Text -match 'api:token-revoke') $dk.Text
+    # Kennung nur ordinal vergleichen: andere Gross/Kleinschreibung = anderes Token
+    Assert (Get-DmsTokenDecision -List $list -Service 'renate' -InstKey 'muster' -Token ('pt1_abcd' + ('q' * 39))).Renew 'Gross/Klein zaehlt'
     Assert (Get-DmsTokenDecision -List $list -Service 'renate' -InstKey 'muster' -Token ('pt1_XyZw' + ('q' * 39))).Renew 'anderes aktiv -> erneuern'
     Assert (Get-DmsTokenDecision -List $list -Service 'olaf' -InstKey 'muster' -Token $tok).Renew 'nur widerrufen -> erneuern'
     Assert (Get-DmsTokenDecision -List @('Keine Programm-Tokens.') -Service 'renate' -InstKey 'muster' -Token $tok).Renew 'keins'
