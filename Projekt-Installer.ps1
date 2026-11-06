@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.8.1
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.9
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -35,6 +35,10 @@
    oder leerer nachgetragen, ein vorhandener NIE geaendert (Update-
    InstalledConfigKeys: php -l, Vergleich aller Werte, Sicherung, atomar).
    Bindings einer vorhandenen Website fasst SNAIL nie an.
+   Anmeldung ueber das DMS (A5): das DMS eines Mandanten (Katalog anmeldestelle)
+   bekommt auth.mode provider und local_url; ein neues Programm desselben
+   Mandanten auth.mode dms und ein Programm-Token (api:token im Ordner des DMS,
+   nie im Protokoll); Wiederholen behaelt ein gueltiges Token.
 
  NAMEN
    Erste Installation eines Dienstes: <Ordner> = <dienst>, jede weitere
@@ -135,7 +139,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.8.1'
+$script:AppVersion = '7.9'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -749,7 +753,7 @@ function ConvertFrom-ProjectJson {
         $svc = [pscustomobject]@{
             Key = $key; Name = $name; Icon = (Get-JsonString $d.icon); Tone = $tone; Description = (Get-JsonString $d.description)
             Logo = $logo; Zip = $zip; UploadsMaxMb = $upload; PhpModules = $mods; Needs = $needs; InCatalog = $true
-            RequestMinMb = $reqMin; MemoryMinMb = $memMin
+            RequestMinMb = $reqMin; MemoryMinMb = $memMin; IsDms = ($d.anmeldestelle -eq $true)
         }
         $services[$key] = $svc
         $list.Add($svc)
@@ -767,7 +771,7 @@ function New-PseudoService {
     return [pscustomobject]@{
         Key = $Key; Name = $(if ($Name) { $Name } else { $Key }); Icon = ''; Tone = ''; Description = ''
         Logo = [pscustomobject]@{ Bytes = $null; Ext = ''; Error = ''; Source = '' }; Zip = ''; UploadsMaxMb = 25
-        PhpModules = @(); Needs = @(); InCatalog = $false; RequestMinMb = 0; MemoryMinMb = $script:MemoryMinMbDefault
+        PhpModules = @(); Needs = @(); InCatalog = $false; RequestMinMb = 0; MemoryMinMb = $script:MemoryMinMbDefault; IsDms = $false
     }
 }
 
@@ -973,10 +977,10 @@ function Set-ConfigTemplateValues {
  python.exe gehoert zu den optionalen Schluesseln: Er wird nur gesetzt, wenn
  die config.example.php des Projekts ihn enthaelt.
 #>
-$script:OptionalConfigKeys = @('python.exe', 'app.key', 'uploads.audio_max_mb')
+$script:OptionalConfigKeys = @('python.exe', 'app.key', 'uploads.audio_max_mb', 'auth.mode', 'auth.dms_service', 'auth.program_token', 'auth.dms_url')
 
 function Get-ConfigValues {
-    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '')
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '', [string]$ProgramToken = '')
     $inst = $Plan.Inst
     $v = [ordered]@{
         'app.name'           = $inst.Service.Name
@@ -1016,6 +1020,14 @@ function Get-ConfigValues {
     if ($AppKey) { $v['app.key'] = $AppKey }
     # Audio-Grenze (D5): nur wenn die config.example.php den Schluessel kennt
     if ($null -ne $Plan.TemplateAudioMaxMb) { $v['uploads.audio_max_mb'] = [int]$Plan.TemplateAudioMaxMb }
+    # Anmeldung (A5): DMS = provider, Programm mit DMS im Mandanten = dms + Token
+    if ($Plan.DmsRole -eq 'provider') { $v['auth.mode'] = 'provider' }
+    elseif ($Plan.DmsRole -eq 'dms' -and $Plan.Dms) {
+        $v['auth.mode'] = 'dms'
+        $v['auth.dms_service'] = [string]$Plan.Dms.ServiceKey
+        $v['auth.dms_url'] = ''
+        $v['auth.program_token'] = $ProgramToken
+    }
     return $v
 }
 
@@ -1025,14 +1037,14 @@ function Get-ConfigValues {
  pruefen, dann umbenennen. Eine vorhandene config.php wird nie ueberschrieben.
 #>
 function Write-ProjectConfig {
-    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '')
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string]$DbPassword, [string]$AppKey = '', [string]$ProgramToken = '')
     $target  = Join-Path $Plan.ProgDir 'config.php'
     $example = Join-Path $Plan.ProgDir 'config.example.php'
     if (Test-Path -LiteralPath $target) { throw "config.php existiert bereits: $target" }
     if (-not (Test-Path -LiteralPath $example)) { throw "config.example.php nicht gefunden: $example" }
 
     $text = [System.IO.File]::ReadAllText($example, [System.Text.Encoding]::UTF8)
-    $values = Get-ConfigValues -Plan $Plan -DbPassword $DbPassword -AppKey $AppKey
+    $values = Get-ConfigValues -Plan $Plan -DbPassword $DbPassword -AppKey $AppKey -ProgramToken $ProgramToken
     $r = Set-ConfigTemplateValues -Text $text -Values $values
     $missing = @($r.Missing | Where-Object { $script:OptionalConfigKeys -notcontains $_ })
     if ($missing.Count -gt 0) {
@@ -1297,6 +1309,68 @@ function Backup-ConfigFile {
  "Fertig" einen Schluessel zum Selbsteintragen (Status manual).
  Status: none (Vorlage ohne app.key) | present | invalid | added | manual | failed
 #>
+<#
+ Werte in einer VORHANDENEN config.php setzen bzw. ergaenzen (app.key, neue
+ Schluessel, Programm-Token): Text aendern (Add-ConfigKeys), config.php.neu,
+ php -l, PHP-Vergleich (neue Werte wie gewollt, alle anderen gleich, nur
+ Namen in der Ausgabe), Original seit dem Lesen gleich, Sicherung, atomar
+ ersetzen. Wirft bei jedem Problem; die config.php bleibt dann unveraendert.
+#>
+function Edit-InstalledConfig {
+    param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][byte[]]$Orig, [Parameter(Mandatory)]$Values, [hashtable]$Allowed = @{})
+    $file = Join-Path $Plan.ProgDir 'config.php'
+    $example = Join-Path $Plan.ProgDir 'config.example.php'
+    $orig = $Orig; $values = $Values; $allowed = $Allowed
+    $neu = $file + '.neu'
+    try {
+        $bom = ($orig.Length -ge 3 -and $orig[0] -eq 0xEF -and $orig[1] -eq 0xBB -and $orig[2] -eq 0xBF)
+        $off = if ($bom) { 3 } else { 0 }
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $text = $utf8.GetString($orig, $off, $orig.Length - $off)
+        $edit = Add-ConfigKeys -Text $text -Values $values -Allowed $allowed
+        if ($edit.Error) { throw $edit.Error }
+        $body = $utf8.GetBytes($edit.Text)
+        $bytes = if ($bom) { [byte[]](@(0xEF, 0xBB, 0xBF) + $body) } else { $body }
+        [System.IO.File]::WriteAllBytes($neu, $bytes)
+
+        $lint = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs @('-l', $neu)) -Utf8Output -TimeoutSec 60
+        if ($lint.ExitCode -ne 0) {
+            $zeile = if ($lint.Output -match 'on line (\d+)') { " (Zeile $($Matches[1]))" } else { '' }
+            throw "php -l meldet einen Fehler in der geaenderten Datei$zeile."
+        }
+        $want = New-Object System.Text.StringBuilder
+        [void]$want.Append('{')
+        $first = $true
+        foreach ($k in $values.Keys) {
+            if (-not $first) { [void]$want.Append(',') }
+            $first = $false
+            $v = $values[$k]
+            $json = if ($v -is [int]) { [string]$v } else { '"' + ([string]$v).Replace('\', '\\').Replace('"', '\"') + '"' }
+            [void]$want.Append('"' + $k + '":' + $json)
+        }
+        [void]$want.Append('}')
+        $chk = Invoke-PhpConfigHelper -PhpExe $Plan.PhpExe -Code $script:PhpConfigVerify -Arguments @($file, $neu, $example) -StdIn $want.ToString()
+        if (-not $chk.ok) {
+            $why = @()
+            if (@($chk.wrong).Count -gt 0) { $why += 'nicht wie gewollt gesetzt: ' + (@($chk.wrong) -join ', ') }
+            if (@($chk.differs).Count -gt 0) { $why += 'sonst abweichend: ' + (@($chk.differs) -join ', ') }
+            throw ('Pruefung nach dem Aendern fehlgeschlagen (' + ($why -join '; ') + ').')
+        }
+        if ($values.Contains('CONFIG_VERSION') -and @($chk.missing).Count -gt 0) {
+            throw ('Nach dem Aendern fehlen noch Schluessel der Vorlage: ' + (@($chk.missing) -join ', ') + '.')
+        }
+        if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String($orig)) {
+            throw 'Die config.php wurde waehrend des Laufs geaendert.'
+        }
+        $backup = Backup-ConfigFile -Plan $Plan -Bytes $orig
+        [System.IO.File]::Replace($neu, $file, [NullString]::Value)
+        return [pscustomobject]@{ Changed = @($edit.Changed); Backup = $backup }
+    } catch {
+        Remove-Item -LiteralPath $neu -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 $script:ConfigV4Keys = @('app.key_previous', 'mail.redirect_to')
 $script:AudioMaxMbDefault = 300
 $script:MemoryMinMbDefault = 256
@@ -1343,53 +1417,13 @@ function Update-InstalledConfigKeys {
     }
     $res.Status = if ($res.Key) { 'added' } else { 'present' }
 
-    $neu = $file + '.neu'
     try {
-        $bom = ($orig.Length -ge 3 -and $orig[0] -eq 0xEF -and $orig[1] -eq 0xBB -and $orig[2] -eq 0xBF)
-        $off = if ($bom) { 3 } else { 0 }
-        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
-        $text = $utf8.GetString($orig, $off, $orig.Length - $off)
-        $edit = Add-ConfigKeys -Text $text -Values $values -Allowed $allowed
-        if ($edit.Error) { throw $edit.Error }
-        $body = $utf8.GetBytes($edit.Text)
-        $bytes = if ($bom) { [byte[]](@(0xEF, 0xBB, 0xBF) + $body) } else { $body }
-        [System.IO.File]::WriteAllBytes($neu, $bytes)
-
-        $lint = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs @('-l', $neu)) -Utf8Output -TimeoutSec 60
-        if ($lint.ExitCode -ne 0) {
-            $zeile = if ($lint.Output -match 'on line (\d+)') { " (Zeile $($Matches[1]))" } else { '' }
-            throw "php -l meldet einen Fehler in der ergänzten Datei$zeile."
-        }
-        $want = New-Object System.Text.StringBuilder
-        [void]$want.Append('{')
-        $first = $true
-        foreach ($k in $values.Keys) {
-            if (-not $first) { [void]$want.Append(',') }
-            $first = $false
-            $v = $values[$k]
-            $json = if ($v -is [int]) { [string]$v } else { '"' + ([string]$v).Replace('\', '\\').Replace('"', '\"') + '"' }
-            [void]$want.Append('"' + $k + '":' + $json)
-        }
-        [void]$want.Append('}')
-        $chk = Invoke-PhpConfigHelper -PhpExe $Plan.PhpExe -Code $script:PhpConfigVerify -Arguments @($file, $neu, $example) -StdIn $want.ToString()
-        if (-not $chk.ok) {
-            $why = @()
-            if (@($chk.wrong).Count -gt 0) { $why += 'nicht wie gewollt gesetzt: ' + (@($chk.wrong) -join ', ') }
-            if (@($chk.differs).Count -gt 0) { $why += 'sonst abweichend: ' + (@($chk.differs) -join ', ') }
-            throw ('Prüfung nach dem Ergänzen fehlgeschlagen (' + ($why -join '; ') + ').')
-        }
-        if ($values.Contains('CONFIG_VERSION') -and @($chk.missing).Count -gt 0) {
-            throw ('Nach dem Ergänzen fehlen noch Schlüssel der Vorlage: ' + (@($chk.missing) -join ', ') + '.')
-        }
-        if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($file)) -cne [Convert]::ToBase64String($orig)) {
-            throw 'Die config.php wurde während des Laufs geändert.'
-        }
-        $res.Backup = Backup-ConfigFile -Plan $Plan -Bytes $orig
-        [System.IO.File]::Replace($neu, $file, [NullString]::Value)
+        $e = Edit-InstalledConfig -Plan $Plan -Orig $orig -Values $values -Allowed $allowed
+        $res.Backup = $e.Backup
+        $edit = $e
         $res.Changed = @($edit.Changed)
         $res.Text = ('Ergänzt: {0} (php -l und Vergleich ohne Befund, alle anderen Werte unverändert). Vorheriger Stand: {1}' -f ($res.Changed -join ', '), $res.Backup)
     } catch {
-        Remove-Item -LiteralPath $neu -Force -ErrorAction SilentlyContinue
         $res.Changed = @()
         $res.Status = if ($res.Key) { 'manual' } else { 'failed' }
         $res.Text = 'config.php nicht geändert: ' + $_.Exception.Message
@@ -1516,6 +1550,8 @@ function Merge-ServicesJson {
     }
     $own['name'] = $Installation.Name
     $own['url']  = $Installation.Url
+    # local_url (seit A5): nur wenn angegeben (DMS); sonst bleibt ein vorhandener Wert
+    if ($Installation.PSObject.Properties['LocalUrl'] -and $Installation.LocalUrl) { $own['local_url'] = [string]$Installation.LocalUrl }
     # "installations" ans Ende des Dienst-Eintrags, wie im Beispiel der Vorlage
     if ($svc.Contains('installations')) { $svc.Remove('installations') }
     $svc['installations'] = $insts
@@ -1634,8 +1670,15 @@ function Update-ServicesJson {
     }
 
     try {
+        $localUrl = if ($Plan.DmsRole -eq 'provider' -and $inst.Port -gt 0) { "http://localhost:$($inst.Port)/" } else { '' }
         $tree = Merge-ServicesJson -Tree $tree -Service $inst.Service -LogoRel $logoRel `
-            -Installation ([pscustomobject]@{ Key = $inst.Key; Name = $inst.Name; Url = $inst.Url })
+            -Installation ([pscustomobject]@{ Key = $inst.Key; Name = $inst.Name; Url = $inst.Url; LocalUrl = $localUrl })
+        # Programm mit Anmeldung ueber das DMS: dessen local_url nachtragen, falls sie fehlt
+        if ($Plan.DmsRole -eq 'dms' -and $Plan.Dms -and $Plan.Dms.Port -gt 0) {
+            if (Set-ServicesLocalUrl -Tree $tree -ServiceKey $Plan.Dms.ServiceKey -InstKey $Plan.Dms.Key -LocalUrl ("http://localhost:{0}/" -f $Plan.Dms.Port)) {
+                $hints.Add(("local_url des DMS {0} nachgetragen: http://localhost:{1}/" -f $Plan.Dms.Ordner, $Plan.Dms.Port))
+            }
+        }
     } catch {
         return [pscustomobject]@{ Ok = $false; Text = $_.Exception.Message; Hints = $hints.ToArray() }
     }
@@ -2777,7 +2820,10 @@ function Invoke-ConsoleMigrate {
     $r = Invoke-Console -Plan $Plan -Arguments @('migrate')
     if ($r.ExitCode -ne 0) { throw "Migrationen fehlgeschlagen (php bin\console migrate): $(Get-ErrorLine -Lines $r.Lines)" }
     $count = @($r.Lines | Where-Object { $_ -match '^\s*\[OK\]' }).Count
-    return [pscustomobject]@{ Count = $count; UpToDate = (($r.Lines -join ' ') -match 'Keine offenen Migrationen') }
+    # DMS (A5): "Anmeldestelle eingerichtet: N aktive(r) Benutzer ..." (einmalig)
+    $provider = @($r.Lines | Where-Object { $_ -match 'Anmeldestelle eingerichtet' }) | Select-Object -First 1
+    if ($provider) { Write-Log ('Anmeldestelle: ' + $provider.Trim()) 'Ok' }
+    return [pscustomobject]@{ Count = $count; UpToDate = (($r.Lines -join ' ') -match 'Keine offenen Migrationen'); Provider = [string]$provider }
 }
 
 # Aussagekraeftige Fehlerzeile aus einer Ausgabe: die erste mit [FEHLER]/Fehler,
@@ -2993,7 +3039,7 @@ function Save-InstallCredentials {
         if (-not (Test-Path -LiteralPath $script:CredDir)) { New-Item -ItemType Directory -Path $script:CredDir -Force | Out-Null }
         $map = [ordered]@{}
         $old = Read-KeyValueFile -Path $file
-        $order = @('format', 'dienst', 'installation', 'mandant_name', 'ordner', 'url', 'lokal', 'db_host', 'db_port', 'db_name', 'db_benutzer', 'db_passwort', 'app_key', 'admin_login', 'admin_initialpasswort')
+        $order = @('format', 'dienst', 'installation', 'mandant_name', 'ordner', 'url', 'lokal', 'db_host', 'db_port', 'db_name', 'db_benutzer', 'db_passwort', 'app_key', 'program_token', 'admin_login', 'admin_initialpasswort')
         foreach ($k in $order) { if ($old -and $old.ContainsKey($k)) { $map[$k] = $old[$k] } }
         if ($old) { foreach ($k in $old.Keys) { if (-not $map.Contains($k)) { $map[$k] = $old[$k] } } }
         $map['format'] = [string]$script:FormatVersion
@@ -3010,6 +3056,10 @@ function Save-InstallCredentials {
         [void]$sb.AppendLine('# Diese Datei enthaelt Klartextpasswoerter. Nach dem Uebertragen in den')
         [void]$sb.AppendLine('# Passwortmanager bitte loeschen. Das DB-Passwort steht auch in der config.php,')
         [void]$sb.AppendLine('# das Initialpasswort gilt nur bis zum ersten Login (Wechsel erzwungen).')
+        if ($map.Contains('program_token')) {
+            [void]$sb.AppendLine('# program_token (= auth.program_token): Anmeldung dieses Programms am DMS. Ein neues')
+            [void]$sb.AppendLine('# erzeugt nur "php bin\console api:token" im Ordner des DMS (das alte wird dabei ungueltig).')
+        }
         if ($map.Contains('app_key')) {
             [void]$sb.AppendLine('# app_key (= app.key in der config.php): mit der config.php sichern und im')
             [void]$sb.AppendLine('# Passwortmanager ablegen - ohne ihn sind gespeicherte Passwoerter verloren.')
@@ -3021,6 +3071,170 @@ function Save-InstallCredentials {
         Write-Log "Zugangsdaten konnten nicht abgelegt werden ($file): $($_.Exception.Message)" 'Warn'
     }
     return $file
+}
+
+# ==============================================================================
+# 13a) Anmeldung ueber das DMS (A5, Vertrag in docs/03 der Vorlage)
+# ==============================================================================
+
+<#
+ Je Mandant ist das DMS (werner, auth.mode provider) die Anmeldestelle; die
+ anderen Programme desselben Mandanten melden sich darueber an (auth.mode dms,
+ Programm-Token aus "php bin\console api:token" im Ordner des DMS). SNAIL
+ installiert immer genau eine Installation je Lauf - "DMS zuerst" heisst: ein
+ Programm wird nur angebunden, wenn das DMS des Mandanten schon am Server ist,
+ sonst bleibt es lokal (Hinweis auf "Pruefen"). Vorhandene lokale Programme
+ stellt SNAIL nicht um (Vorlage docs/03, Punkt 7: bewusster Schritt).
+#>
+$script:ProgramTokenPattern = '^pt1_[A-Za-z0-9_-]{43}$'
+
+# Rolle einer Installation: provider (DMS), dms (Programm mit DMS) oder local.
+# $Instances: am Server erkannte Installationen (Get-InstalledInstances).
+function Get-DmsPlan {
+    param([Parameter(Mandatory)]$Target, $Instances = @(), [bool]$TemplateKnowsAuth = $true, $Catalog = @())
+    $res = [pscustomobject]@{ Role = 'local'; Dms = $null; Hints = @() }
+    $hints = New-Object System.Collections.Generic.List[object]
+    $svc = $Target.Service
+    $own = if ($Target.Kind -ne 'new') { $Target.Instance } else { $null }
+    if ($svc.IsDms -or ($own -and $own.AuthMode -eq 'provider')) {
+        $res.Role = 'provider'
+        if (-not $TemplateKnowsAuth) {
+            $hints.Add(@{ Level = 'Warn'; Text = 'Die Vorlage dieses Programmcodes kennt den Bereich auth nicht (CONFIG_VERSION < 5) - keine Anmeldestelle.' })
+            $res.Role = 'local'
+        } elseif ($own -and $own.AuthMode -ne 'provider') {
+            $hints.Add(@{ Level = 'Warn'; Text = ("auth.mode der vorhandenen config.php ist '{0}' statt provider - SNAIL stellt eine vorhandene Installation nicht um (von Hand: 'mode' => 'provider', danach migrate)." -f $own.AuthMode) })
+        } else {
+            $hints.Add(@{ Level = 'Ok'; Text = ("Anmeldestelle (DMS) fuer den Mandanten '{0}': auth.mode provider, local_url in der services.json, migrate richtet sie ein." -f $Target.Key) })
+        }
+        $res.Hints = $hints.ToArray()
+        return $res
+    }
+    $dmsList = @($Instances | Where-Object { -not $_.Error -and $_.AuthMode -eq 'provider' -and $_.Key -ceq $Target.Key -and $_.Ordner -ne $Target.Ordner })
+    if ($own) {
+        if ($own.AuthMode -eq 'dms') {
+            $res.Role = 'dms'
+            $res.Dms = @($dmsList | Where-Object { $_.ServiceKey -ceq $own.AuthDmsService }) + $dmsList | Select-Object -First 1
+            if ($res.Dms) {
+                $hints.Add(@{ Level = 'Ok'; Text = ("Anmeldung ueber das DMS {0} ({1}): Programm-Token bleibt, wenn check es annimmt; sonst neu im Ordner des DMS." -f $res.Dms.Display, $res.Dms.Ordner) })
+            } else {
+                $hints.Add(@{ Level = 'Warn'; Text = ("Das Programm meldet sich ueber das DMS '{0}' an, das DMS dieses Mandanten ist auf diesem Server aber nicht zu finden - check wird scheitern." -f $own.AuthDmsService) })
+            }
+        } elseif ($dmsList.Count -gt 0) {
+            $hints.Add(@{ Level = 'Info'; Text = ("Das Programm meldet sich lokal an; das DMS {0} ist da. Umstellen auf das DMS ist ein bewusster Schritt - SNAIL stellt vorhandene Programme nicht um." -f $dmsList[0].Display) })
+        }
+        $res.Hints = $hints.ToArray()
+        return $res
+    }
+    if ($dmsList.Count -eq 0) {
+        $cat = @($Catalog | Where-Object { $_.IsDms }) | Select-Object -First 1
+        $tip = if ($cat) { " Fuer die Anmeldung ueber das DMS zuerst {0} fuer diesen Mandanten installieren." -f $cat.Name } else { '' }
+        $hints.Add(@{ Level = 'Info'; Text = ("Kein DMS fuer den Mandanten '{0}' auf diesem Server - das Programm meldet sich lokal an (auth.mode local).{1}" -f $Target.Key, $tip) })
+    } elseif (-not $TemplateKnowsAuth) {
+        $hints.Add(@{ Level = 'Warn'; Text = 'Das DMS ist da, die Vorlage dieses Programmcodes kennt den Bereich auth aber nicht (CONFIG_VERSION < 5) - das Programm bleibt lokal.' })
+    } else {
+        $res.Role = 'dms'
+        $res.Dms = $dmsList[0]
+        $hints.Add(@{ Level = 'Ok'; Text = ("Anmeldung ueber das DMS {0} ({1}): auth.mode dms, Programm-Token per api:token im Ordner des DMS, Notfallkonto 'notfall'." -f $res.Dms.Display, $res.Dms.Ordner) })
+    }
+    $res.Hints = $hints.ToArray()
+    return $res
+}
+
+# Programm-Token im Ordner des DMS erzeugen. stdout = genau das Token (nie ins
+# Protokoll), stderr = Hinweise (ins Protokoll). Jeder Aufruf entwertet ein
+# vorhandenes Token dieses Programms.
+function New-DmsProgramToken {
+    param([Parameter(Mandatory)]$Dms, [Parameter(Mandatory)][string]$PhpExe, [Parameter(Mandatory)][string]$Service,
+          [Parameter(Mandatory)][string]$Installation, [string]$Name = '')
+    $console = Join-Path (Join-Path $Dms.ProgDir 'bin') 'console'
+    if (-not (Test-Path -LiteralPath $console)) { throw "Konsole des DMS nicht gefunden: $console" }
+    $a = @($console, 'api:token', $Service, $Installation)
+    if ($Name) { $a += "--name=$Name" }
+    Write-Log ("php bin\console api:token {0} {1} im Ordner des DMS {2}" -f $Service, $Installation, $Dms.ProgDir)
+    $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs $a) -WorkingDirectory $Dms.ProgDir -Utf8Output -TimeoutSec 120
+    $errLines = @(([string]$r.Error) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+    foreach ($l in $errLines) { Write-Log ('  ' + $l.Trim()) }
+    if ($r.ExitCode -ne 0) {
+        throw ("api:token im DMS fehlgeschlagen (Exit-Code {0}): {1}" -f $r.ExitCode, $(if ($errLines.Count -gt 0) { $errLines[-1].Trim() } else { 'siehe Protokoll' }))
+    }
+    $out = @(([string]$r.Output) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+    if ($out.Count -ne 1 -or $out[0].Trim() -cnotmatch $script:ProgramTokenPattern) {
+        throw 'api:token lieferte kein Programm-Token (erwartet genau eine Zeile pt1_..., 47 Zeichen) - nichts uebernommen.'
+    }
+    Write-Log ("Programm-Token fuer {0}/{1} im DMS erzeugt (Wert nur in config.php und Zugangsdatei)." -f $Service, $Installation) 'Ok'
+    return $out[0].Trim()
+}
+
+# Zeile "Anmeldung ueber das DMS (...)" aus der Ausgabe von check bewerten
+function Get-DmsCheckState {
+    param($Items = @())
+    $it = @($Items | Where-Object { $_.Label -match '^Anmeldung .ber das DMS' }) | Select-Object -First 1
+    if (-not $it) { return [pscustomobject]@{ Found = $false; Ok = $false; Status = ''; TokenProblem = $false; Text = '' } }
+    $tokenProblem = ($it.Status -eq 'FEHLER' -and ($it.Hint -match 'program_token fehlt|lehnt das Programm-Token ab'))
+    return [pscustomobject]@{
+        Found = $true; Ok = ($it.Status -eq 'OK' -and $it.Label -match 'erreichbar, Programm-Token g'); Status = $it.Status
+        TokenProblem = $tokenProblem; Text = (($it.Label + ' ' + $it.Hint).Trim())
+    }
+}
+
+<#
+ Programm-Token eines vorhandenen Programms (Wiederholen/Aktualisieren,
+ Fortsetzen): ein gueltiges bleibt - geprueft mit check des Programms. Nur wenn
+ es fehlt bzw. das Format nicht stimmt oder das DMS es ablehnt, ein neues
+ erzeugen und mit dem Verfahren von Edit-InstalledConfig eintragen. Scheitert
+ das Eintragen, ist das alte Token schon ungueltig: Status manual, das neue
+ steht dann in der Zugangsdatei und auf "Fertig".
+ Status: kept | new | manual
+#>
+function Update-DmsProgramToken {
+    param([Parameter(Mandatory)]$Plan)
+    $res = [pscustomobject]@{ Status = 'kept'; Value = ''; Generated = $false; Backup = ''; Text = '' }
+    $file = Join-Path $Plan.ProgDir 'config.php'
+    $cfg = Read-InstalledConfig -ProgDir $Plan.ProgDir -PhpExe $Plan.PhpExe
+    $old = if ($cfg.auth) { [string]$cfg.auth.program_token } else { '' }
+    $why = ''
+    if ($old -cnotmatch $script:ProgramTokenPattern) { $why = 'fehlt oder hat ein ungueltiges Format' }
+    else {
+        $c = Invoke-ConsoleCheck -Plan $Plan
+        $st = Get-DmsCheckState -Items $c.Items
+        if ($st.TokenProblem) { $why = 'wird vom DMS abgelehnt' }
+        else {
+            $res.Text = 'Programm-Token vorhanden und vom DMS angenommen - bleibt unveraendert.'
+            if ($st.Found -and -not $st.Ok) { $res.Text = 'Programm-Token vorhanden - bleibt unveraendert (check: ' + $st.Text + ').' }
+            return $res
+        }
+    }
+    Write-Log ("Programm-Token {0} - wird neu erzeugt." -f $why) 'Warn'
+    $new = New-DmsProgramToken -Dms $Plan.Dms -PhpExe $Plan.PhpExe -Service $Plan.Inst.Service.Key -Installation $Plan.Inst.Key -Name $Plan.Inst.Service.Name
+    $res.Value = $new; $res.Generated = $true
+    $allowed = @("''", 'null')
+    try { if ($old) { $allowed += (ConvertTo-PhpLiteral $old) } } catch { }
+    try {
+        $e = Edit-InstalledConfig -Plan $Plan -Orig ([System.IO.File]::ReadAllBytes($file)) -Values ([ordered]@{ 'auth.program_token' = $new }) -Allowed @{ 'auth.program_token' = $allowed }
+        $res.Status = 'new'; $res.Backup = $e.Backup
+        $res.Text = "Programm-Token neu erzeugt ($why) und in die config.php eingetragen. Vorheriger Stand: $($e.Backup)"
+    } catch {
+        $res.Status = 'manual'
+        $res.Text = "Neues Programm-Token erzeugt ($why), aber nicht in die config.php eingetragen: $($_.Exception.Message) Das alte ist ungueltig - das neue steht in der Zugangsdatei und auf 'Fertig' (auth.program_token von Hand eintragen)."
+    }
+    return $res
+}
+
+# local_url (Vertrag services.json, seit A5) fuer eine vorhandene Installation setzen, falls sie fehlt
+function Set-ServicesLocalUrl {
+    param($Tree, [Parameter(Mandatory)][string]$ServiceKey, [Parameter(Mandatory)][string]$InstKey, [Parameter(Mandatory)][string]$LocalUrl)
+    if ($null -eq $Tree) { return $false }
+    foreach ($s in @($Tree['services'])) {
+        if ($s -isnot [System.Collections.IDictionary] -or [string]$s['key'] -cne $ServiceKey) { continue }
+        foreach ($x in @($s['installations'])) {
+            if ($x -is [System.Collections.IDictionary] -and [string]$x['key'] -ceq $InstKey) {
+                if ([string]$x['local_url']) { return $false }
+                $x['local_url'] = $LocalUrl
+                return $true
+            }
+        }
+    }
+    return $false
 }
 
 # ==============================================================================
@@ -3064,7 +3278,7 @@ function Get-InstalledInstances {
         $console = Join-Path (Join-Path $d.FullName 'bin') 'console'
         if (-not (Test-Path -LiteralPath (Join-Path $d.FullName 'config.php')) -or -not (Test-Path -LiteralPath $console)) { continue }
         $inst = [pscustomobject]@{
-            Ordner = $d.Name; ProgDir = $d.FullName; ServiceKey = ''; Key = ''; Name = ''; Url = ''; AppName = ''; Version = ''
+            Ordner = $d.Name; ProgDir = $d.FullName; ServiceKey = ''; Key = ''; Name = ''; Url = ''; AppName = ''; Version = ''; AuthMode = 'local'; AuthDmsService = ''
             Port = 0; Bindings = ''; Paths = $null; Db = $null; UploadsMaxMb = 25; UploadsAudioMaxMb = $null; Service = $null; InServicesJson = $false
             ServicesUrl = ''; Error = ''; Display = $d.Name
         }
@@ -3078,6 +3292,9 @@ function Get-InstalledInstances {
             $inst.Key = [string]$j.app.installation
             $inst.Url = [string]$j.app.url
             $inst.AppName = [string]$j.app.name
+            # Anmeldung (A5): local | provider (DMS) | dms; aeltere Staende ohne auth = local
+            if ($j.auth -and $j.auth.mode) { $inst.AuthMode = ([string]$j.auth.mode).ToLowerInvariant() }
+            if ($j.auth -and $j.auth.dms_service) { $inst.AuthDmsService = [string]$j.auth.dms_service }
             $inst.Version = [string]$j.app.version
             $inst.Paths = [pscustomobject]@{
                 Data = [string]$j.paths.data; Cache = [string]$j.paths.cache; Logs = [string]$j.paths.logs
@@ -3377,6 +3594,7 @@ function Test-Installation {
         ServicesJson = $sj; Source = $null; PhpExe = $null; Pg = $null; DbName = $inst.DbName; DbUser = $inst.DbUser
         ExistingConfig = $null; Template = $null; TemplateAudioMaxMb = $null; InstalledVersion = ''; SkipBackup = $false; PythonExe = $null; BackupInfo = $null
         DbResume = $false; DbAdoptNeeded = $false; DbAdoptText = ''; AdoptDb = $false
+        DmsRole = 'local'; Dms = $null
     }
     if (-not $isNew) { $plan.ProgDir = $inst.Instance.ProgDir }
 
@@ -3485,6 +3703,16 @@ function Test-Installation {
     }
     $exRoot = if ($srcRoot) { $srcRoot } else { $plan.ProgDir }
     $plan.TemplateAudioMaxMb = Get-ExampleAudioMaxMb -ExampleFile ([System.IO.Path]::Combine($exRoot, 'config.example.php')) -PhpExe $php
+    # Anmeldung ueber das DMS (A5): Rolle dieser Installation im Mandanten
+    $knowsAuth = Test-ConfigTemplateKey -ExampleFile ([System.IO.Path]::Combine($exRoot, 'config.example.php')) -Key 'auth.mode'
+    $dp = Get-DmsPlan -Target $inst -Instances @($script:Instances) -TemplateKnowsAuth $knowsAuth -Catalog @($script:ServiceList)
+    $plan.DmsRole = $dp.Role; $plan.Dms = $dp.Dms
+    foreach ($h in $dp.Hints) { & $add $h.Level 'Anmeldung' $h.Text }
+    if ($dp.Role -eq 'dms' -and $isNew -and $inst.Admin) {
+        # Notfallkonto nicht wie ein DMS-Benutzer nennen (Vertrag A5, Punkt 5)
+        if ($inst.Admin.Login -ne 'notfall') { & $add 'Info' 'Notfallkonto' ("Lokales Notfallkonto 'notfall' statt '{0}' (Anmeldung unter /login/notfall)." -f $inst.Admin.Login) }
+        $inst.Admin.Login = 'notfall'
+    }
     $audioMb = Get-PlanAudioMaxMb -Plan $plan
     $reqMin = [int]$inst.Service.RequestMinMb
     $limit = Get-UploadLimitBytes -MaxMb $inst.UploadsMaxMb -AudioMaxMb $audioMb -MinMb $reqMin
@@ -3693,6 +3921,9 @@ function Get-StepPlan {
         $s.Add(@{ Key = 'admin';  Title = 'php bin\console user:create (Administrator)'; Fatal = $true })
     }
     $s.Add(@{ Key = 'services'; Title = 'services.json und Logo'; Fatal = $false })
+    if ($Plan.DmsRole -eq 'dms') {
+        $s.Add(@{ Key = 'dmstoken'; Title = 'Anmeldung ueber das DMS: Programm-Token'; Fatal = $false })
+    }
     $s.Add(@{ Key = 'task';     Title = 'Windows-Aufgabe anlegen und anstoßen'; Fatal = $false })
     $s.Add(@{ Key = 'check';    Title = 'php bin\console check'; Fatal = $true })
     $s.Add(@{ Key = 'verify';   Title = 'tools\windows-pruefung.ps1'; Fatal = $false })
@@ -3730,6 +3961,7 @@ function Invoke-Installation {
         Db = @{ Name = $Plan.DbName; User = $Plan.DbUser; Password = $null; Source = ''; Generated = $false }
         Admin = $null; Migrations = $null; Check = $null; Rows = @(); CredFile = $null; Backup = $null; BackupSkipped = $false; Verify = $null
         AppKey = [pscustomobject]@{ Status = ''; Key = ''; Changed = @(); Backup = ''; Text = '' }
+        DmsToken = [pscustomobject]@{ Status = ''; Value = ''; Generated = $false; Backup = ''; Text = '' }
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $steps = Get-StepPlan -Plan $Plan
@@ -3810,7 +4042,15 @@ function Invoke-Installation {
                         if (Test-Path -LiteralPath $script:Result.ConfigFile) {
                             Write-Log "config.php vorhanden - wird nicht angetastet: $($script:Result.ConfigFile)"
                         } else {
-                            $f = Write-ProjectConfig -Plan $Plan -DbPassword $script:Result.Db.Password -AppKey $script:Result.AppKey.Key
+                            $tok = ''
+                            if ($Plan.DmsRole -eq 'dms' -and $Plan.Dms) {
+                                # vor dem Schreiben: das Token kommt gleich mit in die neue config.php
+                                $tok = New-DmsProgramToken -Dms $Plan.Dms -PhpExe $Plan.PhpExe -Service $Plan.Inst.Service.Key -Installation $Plan.Inst.Key -Name $Plan.Inst.Service.Name
+                                $script:Result.DmsToken.Value = $tok; $script:Result.DmsToken.Generated = $true; $script:Result.DmsToken.Status = 'new'
+                                $script:Result.DmsToken.Text = 'Programm-Token im DMS erzeugt und in die neue config.php geschrieben.'
+                            }
+                            $f = Write-ProjectConfig -Plan $Plan -DbPassword $script:Result.Db.Password -AppKey $script:Result.AppKey.Key -ProgramToken $tok
+                            if ($tok) { $script:Result.CredFile = Save-InstallCredentials -Plan $Plan -Values @{ program_token = $tok } }
                             $script:Result.ConfigNew = $true
                             Write-Log "Erzeugt: $f (UTF-8 ohne BOM, php -l ohne Fehler)" 'Ok'
                             if ($script:Result.AppKey.Key -and (Test-ConfigTemplateKey -ExampleFile (Join-Path $Plan.ProgDir 'config.example.php') -Key 'app.key')) {
@@ -3852,6 +4092,19 @@ function Invoke-Installation {
                             $state = 'Warn'
                         }
                     }
+                    'dmstoken' {
+                        if ($script:Result.DmsToken.Generated) {
+                            Write-Log 'Programm-Token in diesem Lauf erzeugt - Kontrolle mit check (letzter Schritt).' 'Ok'
+                        } elseif (-not $Plan.Dms) {
+                            throw 'Das DMS dieses Mandanten ist auf diesem Server nicht zu finden - kein Programm-Token.'
+                        } else {
+                            $t = Update-DmsProgramToken -Plan $Plan
+                            $script:Result.DmsToken = $t
+                            if ($t.Generated) { $script:Result.CredFile = Save-InstallCredentials -Plan $Plan -Values @{ program_token = $t.Value } }
+                            Write-Log $t.Text $(if ($t.Status -eq 'manual') { 'Warn' } else { 'Ok' })
+                            if ($t.Status -eq 'manual') { $rows.Add(@{ Level = 'Error'; Name = 'Programm-Token'; Text = $t.Text }); $state = 'Failed' }
+                        }
+                    }
                     'migrate' {
                         $m = Invoke-ConsoleMigrate -Plan $Plan
                         $script:Result.Migrations = $m
@@ -3891,11 +4144,20 @@ function Invoke-Installation {
                     'check' {
                         $c = Invoke-ConsoleCheck -Plan $Plan
                         $script:Result.Check = $c
+                        $dmsState = if ($Plan.DmsRole -eq 'dms') { Get-DmsCheckState -Items $c.Items } else { $null }
+                        if ($dmsState -and $dmsState.Status -eq 'FEHLER') {
+                            throw ("Anmeldung ueber das DMS: {0} (php bin\console check, Exit-Code {1})" -f $dmsState.Text, $c.ExitCode)
+                        }
                         if (-not $c.Ok) {
                             $fehler = @($c.Items | Where-Object { $_.Status -eq 'FEHLER' } | ForEach-Object { $_.Label })
                             throw ("Die Selbstprüfung meldet Fehler (Exit-Code {0}): {1}. Erneut prüfen: php bin\console check" -f $c.ExitCode, $(if ($fehler.Count -gt 0) { $fehler -join '; ' } else { 'siehe Protokoll' }))
                         }
                         Write-Log $(if ($c.Summary) { $c.Summary } else { 'Selbstprüfung ohne Fehler.' }) 'Ok'
+                        if ($dmsState) {
+                            if (-not $dmsState.Found) { throw 'check meldet keine Zeile "Anmeldung ueber das DMS" - ist auth.mode in der config.php dms?' }
+                            if ($dmsState.Ok) { Write-Log $dmsState.Text 'Ok' }
+                            else { $rows.Add(@{ Level = 'Warn'; Name = 'Anmeldung ueber das DMS'; Text = $dmsState.Text }); $state = 'Warn' }
+                        }
                         if (@($c.Items | Where-Object { $_.Status -eq 'WARNUNG' }).Count -gt 0) { $state = 'Warn' }
                     }
                     'verify' {
@@ -4758,6 +5020,15 @@ function Get-FinishAccess {
             $lines.Add(("             {0}" -f $mask))
             $lines.Add("             Gilt erst, wenn er in der config.php unter 'app' => [ 'key' => '...' ] steht. NUR eintragen, wenn")
             $lines.Add('             app.key dort wirklich fehlt oder leer ist - einen vorhandenen Schlüssel nie ersetzen (Passwörter verloren).')
+        }
+    }
+    $dt = $r.DmsToken
+    if ($dt -and $dt.Status) {
+        if ($dt.Generated -and $dt.Value) {
+            $lines.Add(("Prog.-Token: {0}   ({1})" -f $mask, $(if ($dt.Status -eq 'manual') { 'NICHT eingetragen - von Hand als auth.program_token eintragen' } else { 'im DMS erzeugt, in config.php und Zugangsdatei' })))
+            $secrets.Add([pscustomobject]@{ Label = 'Programm-Token'; Value = [string]$dt.Value })
+        } else {
+            $lines.Add('Prog.-Token: vorhanden, vom DMS angenommen (unveraendert)')
         }
     }
     if ($ak.Key -and @('new', 'added', 'manual') -contains $ak.Status) {

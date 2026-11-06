@@ -46,12 +46,13 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
 # Stubs fuer alles, was Windows oder die Oberflaeche braucht
-function Write-Log { param([string]$Message, [string]$Level = 'Info') if ($env:SNAIL_TEST_VERBOSE) { Write-Host "    [$Level] $Message" } }
+$script:LogLines = New-Object System.Collections.Generic.List[string]
+function Write-Log { param([string]$Message, [string]$Level = 'Info') $script:LogLines.Add($Message); if ($env:SNAIL_TEST_VERBOSE) { Write-Host "    [$Level] $Message" } }
 function Invoke-UiPump { }
 # Unter Windows schuetzt die ACL die pgpass-Datei, unter Linux verlangt libpq 0600
 function Protect-AdminOnly { param([string]$Path) if (-not $IsWindows -and (Test-Path -LiteralPath $Path -PathType Leaf)) { [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]'UserRead, UserWrite') } }
@@ -1172,6 +1173,104 @@ Test-Case 'Katalog: werner anfrageMinMb 48 / memoryMinMb 512, sonst 0 / 256; ung
 }
 
 # =============================================================================
+Write-Host "`n== Anmeldung ueber das DMS (A5): Rolle, check, services.json"
+function New-A5Instance([string]$Ordner, [string]$Svc, [string]$Key, [string]$Mode, [string]$DmsSvc = '', [string]$Err = '') {
+    [pscustomobject]@{ Ordner = $Ordner; ProgDir = "C:\AK\$Ordner"; ServiceKey = $Svc; Key = $Key; AuthMode = $Mode; AuthDmsService = $DmsSvc; Error = $Err; Port = 21100; Display = "$Svc - $Key" }
+}
+$a5Inst = @(
+    (New-A5Instance 'werner' 'werner' 'muster' 'provider'),
+    (New-A5Instance 'werner-beispiel' 'werner' 'beispiel' 'provider' '' 'nicht lesbar'),
+    (New-A5Instance 'renate' 'renate' 'muster' 'dms' 'werner'),
+    (New-A5Instance 'olaf' 'olaf' 'muster' 'local')
+)
+function New-A5Target([string]$SvcKey, [string]$Key, $Instance = $null) {
+    $s = if ($catalog.Services.ContainsKey($SvcKey)) { $catalog.Services[$SvcKey] } else { New-PseudoService -Key $SvcKey }
+    [pscustomobject]@{ Kind = $(if ($Instance) { 'installed' } else { 'new' }); Service = $s; Key = $Key; Ordner = $(if ($Instance) { $Instance.Ordner } else { "$SvcKey-$Key" }); Instance = $Instance }
+}
+Test-Case 'Get-DmsPlan: DMS = provider; Programm mit DMS im Mandanten = dms; ohne DMS lokal mit Hinweis; Wiederholen behaelt die Rolle' {
+    $p = Get-DmsPlan -Target (New-A5Target 'werner' 'neu') -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'provider' $p.Role 'DMS aus dem Katalog'
+    $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'muster') -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'dms' $p.Role; Assert-Equal 'werner' $p.Dms.Ordner
+    Assert ($p.Hints[0].Text -match "notfall") $p.Hints[0].Text
+    $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'beispiel') -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'local' $p.Role 'DMS des Mandanten nicht lesbar -> nicht verwendet'
+    $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'anders') -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'local' $p.Role; Assert-Equal 'Info' $p.Hints[0].Level
+    Assert ($p.Hints[0].Text -match 'lokal' -and $p.Hints[0].Text -match 'zuerst werner') $p.Hints[0].Text
+    $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'muster') -Instances $a5Inst -TemplateKnowsAuth $false -Catalog $catalog.ServiceList
+    Assert-Equal 'local' $p.Role 'Vorlage ohne auth'
+    $p = Get-DmsPlan -Target (New-A5Target 'renate' 'muster' $a5Inst[2]) -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'dms' $p.Role 'Wiederholen eines angebundenen Programms'; Assert-Equal 'werner' $p.Dms.Ordner
+    $p = Get-DmsPlan -Target (New-A5Target 'olaf' 'muster' $a5Inst[3]) -Instances $a5Inst -Catalog $catalog.ServiceList
+    Assert-Equal 'local' $p.Role 'lokales Programm wird nicht umgestellt'; Assert ($p.Hints[0].Text -match 'bewusster Schritt') $p.Hints[0].Text
+    $p = Get-DmsPlan -Target (New-A5Target 'renate' 'muster' (New-A5Instance 'renate' 'renate' 'muster' 'dms' 'werner')) -Instances @() -Catalog $catalog.ServiceList
+    Assert-Equal 'dms' $p.Role; Assert ($null -eq $p.Dms) 'DMS fehlt'; Assert-Equal 'Warn' $p.Hints[0].Level
+    $p = Get-DmsPlan -Target (New-A5Target 'werner' 'muster' (New-A5Instance 'werner' 'werner' 'muster' 'local')) -Instances @() -Catalog $catalog.ServiceList
+    Assert-Equal 'Warn' $p.Hints[0].Level 'DMS mit auth.mode local: nur Hinweis, keine Umstellung'
+    foreach ($h in @($p.Hints)) { Assert ($h.Text -cmatch '^[\x20-\x7E]+$') "nur ASCII: $($h.Text)" }
+    Assert $catalog.Services['werner'].IsDms 'Katalog: werner ist die Anmeldestelle'
+    Assert (-not $catalog.Services['projekt'].IsDms)
+}
+Test-Case 'Get-DmsCheckState: echte check-Zeilen (OK, Token abgelehnt, Token fehlt, DMS fehlt in services.json, nicht erreichbar)' {
+    $u = [string][char]0x00FC
+    $ok = ConvertFrom-CheckOutput @("[OK     ] Anmeldung $($u)ber das DMS (werner): erreichbar, Programm-Token g$($u)ltig")
+    Assert (Get-DmsCheckState $ok).Ok 'OK'
+    $rej = ConvertFrom-CheckOutput @("[FEHLER ] Anmeldung $($u)ber das DMS (werner)", "          Das DMS lehnt das Programm-Token ab (widerrufen oder falsch eingetragen).")
+    $s1 = Get-DmsCheckState $rej; Assert ($s1.TokenProblem -and -not $s1.Ok) 'abgelehnt'
+    $miss = ConvertFrom-CheckOutput @("[FEHLER ] Anmeldung $($u)ber das DMS (werner)", "          auth.program_token fehlt oder hat ein ungueltiges Format (pt1_...). Token erzeugen ...")
+    Assert (Get-DmsCheckState $miss).TokenProblem 'fehlt'
+    $sj = ConvertFrom-CheckOutput @("[FEHLER ] Anmeldung $($u)ber das DMS (werner)", '          Das DMS (Dienst "werner", Installation "muster") steht nicht in der services.json.')
+    $s3 = Get-DmsCheckState $sj; Assert ($s3.Status -eq 'FEHLER' -and -not $s3.TokenProblem) 'services.json: kein neues Token'
+    $w = Get-DmsCheckState (ConvertFrom-CheckOutput @("[WARNUNG] Anmeldung $($u)ber das DMS (werner)", '          DMS nicht erreichbar'))
+    Assert ($w.Found -and -not $w.Ok -and -not $w.TokenProblem) 'Warnung'
+    Assert (-not (Get-DmsCheckState (ConvertFrom-CheckOutput @('[OK     ] Datenbank'))).Found) 'ohne Zeile'
+}
+Test-Case 'services.json: local_url fuer das DMS, nachtragen beim Programm, vorhandener Wert bleibt' {
+    $t = Merge-ServicesJson -Tree $null -Service $catalog.Services['werner'] -Installation ([pscustomobject]@{ Key = 'muster'; Name = 'Muster GmbH'; Url = 'https://werner.muster.de/'; LocalUrl = 'http://localhost:21100/' })
+    Assert-Equal 'http://localhost:21100/' $t['services'][0]['installations'][0]['local_url']
+    $t = Merge-ServicesJson -Tree $t -Service $catalog.Services['werner'] -Installation ([pscustomobject]@{ Key = 'muster'; Name = 'Muster GmbH'; Url = 'https://werner.muster.de/' })
+    Assert-Equal 'http://localhost:21100/' $t['services'][0]['installations'][0]['local_url'] 'ohne LocalUrl bleibt der Wert'
+    $t2 = Merge-ServicesJson -Tree $null -Service $catalog.Services['werner'] -Installation ([pscustomobject]@{ Key = 'muster'; Name = 'M'; Url = 'https://w/' })
+    Assert (Set-ServicesLocalUrl -Tree $t2 -ServiceKey 'werner' -InstKey 'muster' -LocalUrl 'http://localhost:21105/') 'nachgetragen'
+    Assert (-not (Set-ServicesLocalUrl -Tree $t2 -ServiceKey 'werner' -InstKey 'muster' -LocalUrl 'http://localhost:1/')) 'vorhanden -> bleibt'
+    Assert-Equal 'http://localhost:21105/' $t2['services'][0]['installations'][0]['local_url']
+    Assert (-not (Set-ServicesLocalUrl -Tree $t2 -ServiceKey 'gibts' -InstKey 'muster' -LocalUrl 'x')) 'unbekannt'
+}
+Test-Case 'config.php: Rolle provider bzw. dms aus der echten config.example.php; Fertig zeigt das Token nur maskiert' {
+    $d = Join-Path $tmp 'a5cfg'; New-Item -ItemType Directory -Path $d -Force | Out-Null
+    Copy-Item (Join-Path $Vorlage 'config.example.php') $d
+    $pl = New-TestPlan $d (Join-Path $tmp 'a5cfgdaten') (New-InstanceInput -Service $svc -Values (New-TestValues)).Inst
+    $pl.DbName = 'x'; $pl.DbUser = 'x_user'
+    $pl | Add-Member -NotePropertyName DmsRole -NotePropertyValue 'dms'
+    $pl | Add-Member -NotePropertyName Dms -NotePropertyValue ([pscustomobject]@{ ServiceKey = 'werner'; Key = 'muster' })
+    $tok = 'pt1_' + ('A' * 43)
+    $v = Get-ConfigValues -Plan $pl -DbPassword 'x' -ProgramToken $tok
+    Assert-Equal 'dms' $v['auth.mode']; Assert-Equal 'werner' $v['auth.dms_service']; Assert-Equal '' $v['auth.dms_url']; Assert-Equal $tok $v['auth.program_token']
+    Assert-Equal 0 (Set-ConfigTemplateValues -Text ([System.IO.File]::ReadAllText((Join-Path $d 'config.example.php'))) -Values $v).Missing.Count 'alle auth-Schluessel in der Vorlage'
+    $pl.DmsRole = 'provider'
+    $v2 = Get-ConfigValues -Plan $pl -DbPassword 'x'
+    Assert-Equal 'provider' $v2['auth.mode']; Assert (-not $v2.Contains('auth.program_token'))
+    $pl.DmsRole = 'local'
+    Assert (-not (Get-ConfigValues -Plan $pl -DbPassword 'x').Contains('auth.mode')) 'lokal: Vorlage bleibt (local)'
+    $res = New-TestResult
+    $res.DmsToken = [pscustomobject]@{ Status = 'new'; Value = $tok; Generated = $true }
+    $a = Get-FinishAccess -Result $res
+    Assert (-not (($a.Lines -join "`n").Contains($tok))) 'Token nicht im Text'
+    Assert-Equal $tok (@($a.Secrets | Where-Object { $_.Label -eq 'Programm-Token' })[0].Value)
+    $res.DmsToken = [pscustomobject]@{ Status = 'kept'; Value = ''; Generated = $false }
+    $a = Get-FinishAccess -Result $res
+    Assert (@($a.Secrets | Where-Object { $_.Label -eq 'Programm-Token' }).Count -eq 0) 'behaltenes Token: kein Anzeigen/Kopieren'
+    Assert (($a.Lines -join "`n") -match 'Prog.-Token: vorhanden') 'Hinweis'
+}
+Test-Case 'Skript: Token nie ins Protokoll - api:token nicht ueber Invoke-Console, keine Write-Log-Zeile mit Token-Variable' {
+    $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-Console' -and $n.Extent.Text -match 'api:token' }, $true))
+    Assert-Equal 0 $calls.Count 'api:token nur ueber New-DmsProgramToken'
+    $logs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Write-Log' -and $n.Extent.Text -match '\$tok\b|\.Value\b|program_token =|\$new\b|\$out\[' }, $true))
+    Assert-Equal 0 $logs.Count (($logs | ForEach-Object { "Zeile $($_.Extent.StartLineNumber)" }) -join ', ')
+}
+
+# =============================================================================
 if (-not $PgPassword) {
     Write-Host "`n== PostgreSQL: uebersprungen (ohne -PgPassword)"
 } else {
@@ -1351,6 +1450,85 @@ if (-not $PgPassword) {
         Assert-Equal 1 $i.Count; Assert ($i.Bytes -gt 1000)
         $plan2 = [pscustomobject]@{ DataDir = $null; Paths = $plan.Paths }
         Assert-Equal (Get-BackupRoot -Plan $plan) (Get-BackupRoot -Plan $plan2) 'ohne Datenordner: neben Data'
+    }
+    Write-Host "`n== Anmeldung ueber das DMS (A5): DMS mit php -S, Programm, Token"
+    $dmsProg = Join-Path $root 'werner'
+    $appProg = Join-Path $root 'renate'
+    Copy-Item -Path $st.Root -Destination $dmsProg -Recurse
+    Copy-Item -Path $st.Root -Destination $appProg -Recurse
+    $dmsPort = Get-Random -Minimum 28100 -Maximum 28900
+    $sjA5 = Join-Path $root 'services-a5.json'
+    $dmsInst = (New-InstanceInput -Service $svc -Values (New-TestValues @{ Port = [string]$dmsPort })).Inst
+    $dmsPlan = New-TestPlan $dmsProg (Join-Path $tmp 'daten-a5/werner') $dmsInst
+    $dmsPlan.DbName = $db; $dmsPlan.DbUser = $role; $dmsPlan.Pg = $pg; $dmsPlan.ServicesJson = $sjA5
+    $dmsPlan | Add-Member -NotePropertyName DmsRole -NotePropertyValue 'provider'
+    $dmsPlan | Add-Member -NotePropertyName Dms -NotePropertyValue $null
+    $renate = $catalog.Services['renate']
+    $appInst = (New-InstanceInput -Service $renate -Values (New-TestValues @{ Port = '28999' })).Inst
+    $appPlan = New-TestPlan $appProg (Join-Path $tmp 'daten-a5/renate') $appInst
+    $appPlan.DbName = $db; $appPlan.DbUser = $role; $appPlan.Pg = $pg; $appPlan.ServicesJson = $sjA5; $appPlan.Mode = 'repeat'; $appPlan.Kind = 'installed'
+    $dmsRef = [pscustomobject]@{ ServiceKey = 'projekt'; Key = $dmsInst.Key; Ordner = 'werner'; ProgDir = $dmsProg; Port = $dmsPort; Display = 'DMS - Test' }
+    $appPlan | Add-Member -NotePropertyName DmsRole -NotePropertyValue 'dms'
+    $appPlan | Add-Member -NotePropertyName Dms -NotePropertyValue $dmsRef
+    $server = $null
+    $script:LogLines.Clear()
+    try {
+        Test-Case 'DMS: config.php mit auth.mode provider, migrate richtet die Anmeldestelle ein, services.json mit local_url' {
+            New-DataFolders -Plan $dmsPlan
+            Write-ProjectConfig -Plan $dmsPlan -DbPassword $dbPw -AppKey (New-AppKey) | Out-Null
+            Assert-Equal 'provider' (Read-InstalledConfig -ProgDir $dmsProg -PhpExe $PhpExe).auth.mode
+            $m = Invoke-ConsoleMigrate -Plan $dmsPlan
+            Assert ($m.Provider -match 'Anmeldestelle eingerichtet') "Zeile Anmeldestelle: '$($m.Provider)'"
+            Assert (@($script:LogLines | Where-Object { $_ -match '^Anmeldestelle: ' }).Count -eq 1) 'im Protokoll'
+            $r = Update-ServicesJson -Plan $dmsPlan
+            Assert $r.Ok $r.Text
+            $j = Get-Content $sjA5 -Raw | ConvertFrom-Json
+            Assert-Equal "http://localhost:$dmsPort/" $j.services[0].installations[0].local_url 'local_url des DMS'
+            $p = Test-WithVorlage $sjA5
+            Assert ($null -eq $p.error) "Vorlage liest services.json: $($p.error)"
+        }
+        $server = Start-Process -FilePath $PhpExe -ArgumentList @('-S', "localhost:$dmsPort", '-t', (Join-Path $dmsProg 'public'), (Join-Path $dmsProg 'public/index.php')) -PassThru -RedirectStandardOutput (Join-Path $tmp 'phps.out') -RedirectStandardError (Join-Path $tmp 'phps.err')
+        Start-Sleep -Seconds 2
+        Test-Case 'Programm: Token per api:token im DMS (nie im Protokoll), config.php mit auth.mode dms, check: erreichbar, Token gueltig' {
+            $tok = New-DmsProgramToken -Dms $dmsRef -PhpExe $PhpExe -Service 'renate' -Installation $appInst.Key -Name 'Renate'
+            Assert ($tok -cmatch $script:ProgramTokenPattern) 'Format pt1_ + 43'
+            Assert-Equal 47 $tok.Length
+            New-DataFolders -Plan $appPlan
+            Write-ProjectConfig -Plan $appPlan -DbPassword $dbPw -AppKey (New-AppKey) -ProgramToken $tok | Out-Null
+            $c = Read-InstalledConfig -ProgDir $appProg -PhpExe $PhpExe
+            Assert-Equal 'dms' $c.auth.mode; Assert-Equal 'projekt' $c.auth.dms_service; Assert-Equal '' $c.auth.dms_url; Assert-Equal $tok $c.auth.program_token
+            Assert-Equal 'renate' $c.app.service
+            $r = Update-ServicesJson -Plan $appPlan
+            Assert $r.Ok $r.Text
+            $chk = Invoke-ConsoleCheck -Plan $appPlan
+            $stt = Get-DmsCheckState -Items $chk.Items
+            Assert $stt.Ok ("check: " + $stt.Text)
+            $script:A5Token = $tok
+            Assert (-not (($script:LogLines -join "`n").Contains($tok))) 'Token nicht im Protokoll'
+            $cf = Save-InstallCredentials -Plan $appPlan -Values @{ program_token = $tok }
+            Assert-Equal $tok (Read-KeyValueFile $cf)['program_token'] 'Zugangsdatei'
+        }
+        Test-Case 'Wiederholen: gueltiges Token bleibt (kein api:token), abgelehntes wird ersetzt (Sicherung, check wieder ok)' {
+            $before = [System.IO.File]::ReadAllBytes((Join-Path $appProg 'config.php'))
+            $t = Update-DmsProgramToken -Plan $appPlan
+            Assert-Equal 'kept' $t.Status $t.Text
+            Assert (-not $t.Generated) 'nichts erzeugt'
+            Assert-Equal ([Convert]::ToBase64String($before)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Join-Path $appProg 'config.php')))) 'config.php unveraendert'
+            # Token im DMS widerrufen -> check lehnt ab -> neues Token
+            $rv = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @((Join-Path $dmsProg 'bin/console'), 'api:token-revoke', 'renate', $appInst.Key)) -WorkingDirectory $dmsProg -Utf8Output
+            Assert-Equal 0 $rv.ExitCode ($rv.Lines -join ' ')
+            $t2 = Update-DmsProgramToken -Plan $appPlan
+            Assert-Equal 'new' $t2.Status $t2.Text
+            Assert ($t2.Value -cne $script:A5Token -and $t2.Value -cmatch $script:ProgramTokenPattern) 'neues Token'
+            Assert-Equal $t2.Value (Read-InstalledConfig -ProgDir $appProg -PhpExe $PhpExe).auth.program_token 'eingetragen'
+            Assert (Test-Path $t2.Backup) 'Sicherung'
+            Assert (Get-DmsCheckState -Items (Invoke-ConsoleCheck -Plan $appPlan).Items).Ok 'check wieder ok'
+            $log = $script:LogLines -join "`n"
+            Assert (-not $log.Contains($t2.Value) -and -not $log.Contains($script:A5Token)) 'kein Token im Protokoll'
+            Assert ($t2.Text -notmatch 'pt1_') 'kein Token in der Meldung'
+        }
+    } finally {
+        if ($server) { try { Stop-Process -Id $server.Id -Force } catch { } }
     }
     try {
         Invoke-Psql -Pg $pg -Password $PgPassword -Sql "DROP DATABASE IF EXISTS ""$db"";" | Out-Null
