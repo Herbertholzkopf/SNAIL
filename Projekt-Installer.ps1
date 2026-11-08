@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.10
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.11
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -25,11 +25,12 @@
      Windows-Aufgabe (einmal anstossen) -> check -> tools\windows-pruefung.ps1
    Vorhandene Installation:
      ohne ZIP = Einrichtung wiederholen (alles angleichen, Code bleibt);
-     mit ZIP  = Aktualisieren: Sicherung (pg_dump + config.php nach
-     <Datenordner>\Sicherung, abwaehlbar nur mit Bestaetigung) -> App-Pool
-     anhalten -> robocopy /MIR (config.php mit vollem Pfad ausgenommen) ->
-     IIS/Rechte angleichen -> app.key nachtragen (nur wenn er fehlt) -> migrate
-     -> services.json -> Aufgabe -> check
+     mit ZIP  = Aktualisieren: Windows-Aufgaben deaktivieren (laufende
+     abwarten) -> Sicherung (pg_dump + config.php nach <Datenordner>\Sicherung,
+     abwaehlbar nur mit Bestaetigung) -> App-Pool anhalten -> robocopy /MIR
+     (config.php mit vollem Pfad ausgenommen) -> IIS/Rechte angleichen ->
+     app.key nachtragen (nur wenn er fehlt) -> migrate -> Aufgaben aktivieren,
+     App-Pool starten -> services.json -> Aufgabe -> check
    app.key (Schluessel fuer Geheimnisse in der Datenbank): bei der
    Neuinstallation erzeugt; bei Wiederholen/Aktualisieren nur ein fehlender
    oder leerer nachgetragen, ein vorhandener NIE geaendert (Update-
@@ -139,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.10'
+$script:AppVersion = '7.11'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -191,6 +192,7 @@ $script:CheckOk       = $false
 $script:Busy          = $false
 $script:AbortRequested = $false
 $script:CloseAfterAbort = $false
+$script:SuspendedTasks = @()
 $script:Result        = @{}
 $script:AppIcon       = $null
 $script:CurrentPage   = 'select'
@@ -1994,7 +1996,7 @@ function Get-NextFreePort {
  Handler/Module fasst SNAIL nicht an (macht WIPP auf Serverebene).
 #>
 function Set-ProjectSite {
-    param([Parameter(Mandatory)]$Plan)
+    param([Parameter(Mandatory)]$Plan, [switch]$KeepPoolStopped)
     $name = $Plan.Ordner
     $docRoot = Join-Path $Plan.ProgDir 'public'
     if (-not (Test-Path -LiteralPath $docRoot)) { throw "Der Website-Pfad existiert nicht: $docRoot" }
@@ -2045,7 +2047,8 @@ function Set-ProjectSite {
     if ($r.ExitCode -ne 0) { throw "Upload-Grenze konnte nicht gesetzt werden: $($r.Output)" }
     Write-Log (Format-UploadLimitLog -Bytes $bytes -MaxMb $Plan.Inst.UploadsMaxMb -AudioMaxMb $audio -MinMb $reqMin -KeptHigher ($have -gt $want)) 'Ok'
 
-    Start-ProjectPool -Name $name
+    if ($KeepPoolStopped) { Write-Log "App-Pool '$name' bleibt bis nach migrate angehalten." }
+    else { Start-ProjectPool -Name $name }
     $r = Invoke-AppCmd @('start', 'site', "/site.name:$name")
     if ($r.ExitCode -eq 0) {
         Write-Log 'Website gestartet.' 'Ok'
@@ -2961,6 +2964,82 @@ function Invoke-TaskScript {
  aufgerufen". tasks:run darf jederzeit laufen (die Anwendung entscheidet, was
  faellig ist). Wartet hoechstens 2 Minuten.
 #>
+<#
+ Windows-Aufgaben einer Installation waehrend Aktualisieren/Wiederholen
+ anhalten (SNAIL 7.11): sonst kann ein jobs:work-Lauf im Minutentakt mit halb
+ kopiertem Code bzw. waehrend der Migration laufen. Gemeint sind die Aufgaben
+ unter \AK\ mit dem Namen "<Ordner> Aufgabenplanung" bzw. "<Ordner> <...>"
+ (Leerzeichen nach dem Ordner: "projekt-beispiel ..." gehoert nicht zu "projekt").
+ Nur Aufgaben, die SNAIL selbst deaktiviert hat, werden wieder aktiviert - eine
+ vom Admin deaktivierte bleibt aus. Ein laufendes Exemplar wird nicht beendet,
+ SNAIL wartet hoechstens $script:TaskWaitSeconds und bricht dann ab, bevor
+ etwas geaendert ist (die Aufgaben werden dabei wieder aktiviert).
+#>
+$script:TaskWaitSeconds = 300
+
+function Select-ProjectTaskNames {
+    param($Names = @(), [Parameter(Mandatory)][string]$Ordner)
+    $own = "$Ordner Aufgabenplanung"
+    return @(@($Names) | Where-Object { $_ -and ($_ -ieq $own -or ([string]$_).StartsWith("$Ordner ", [System.StringComparison]::OrdinalIgnoreCase)) })
+}
+
+# Warten, bis keine der Aufgaben mehr laeuft. $GetState: { param($name) 'Running'|'Ready'|... }
+function Wait-ProjectTasksIdle {
+    param([Parameter(Mandatory)][string[]]$Names, [Parameter(Mandatory)][scriptblock]$GetState, [int]$TimeoutSec = $script:TaskWaitSeconds, [int]$PollMs = 1000)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastLog = -15   # erste Zeile sofort, dann alle 15 s
+    while ($true) {
+        $running = @($Names | Where-Object { [string](& $GetState $_) -eq 'Running' })
+        if ($running.Count -eq 0) { return [pscustomobject]@{ Idle = $true; Running = @(); Seconds = [int]$sw.Elapsed.TotalSeconds } }
+        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) { return [pscustomobject]@{ Idle = $false; Running = $running; Seconds = [int]$sw.Elapsed.TotalSeconds } }
+        $sec = [int]$sw.Elapsed.TotalSeconds
+        if ($sec -ge $lastLog + 15) {
+            Write-Log ("Warte auf laufende Windows-Aufgabe(n): {0} ({1} s von hoechstens {2} s)" -f ($running -join ', '), $sec, $TimeoutSec)
+            $lastLog = $sec
+        }
+        if ($script:AbortRequested) { return [pscustomobject]@{ Idle = $false; Running = $running; Seconds = $sec } }
+        $steps = [math]::Max(1, [int]($PollMs / 100))
+        for ($k = 0; $k -lt $steps; $k++) { Start-Sleep -Milliseconds 100; Invoke-UiPump }
+    }
+}
+
+# Aufgaben der Installation deaktivieren und laufende abwarten; liefert die Namen, die SNAIL deaktiviert hat
+function Suspend-ProjectTasks {
+    param([Parameter(Mandatory)][string]$Ordner)
+    $all = @()
+    try { $all = @(Get-ScheduledTask -TaskPath '\AK\' -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) } catch { $all = @() }
+    $names = @(Select-ProjectTaskNames -Names $all -Ordner $Ordner)
+    if ($names.Count -eq 0) { Write-Log "Keine Windows-Aufgabe unter \AK\ fuer $Ordner - nichts anzuhalten."; return @() }
+    $disabled = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $names) {
+        $t = Get-ScheduledTask -TaskPath '\AK\' -TaskName $n
+        if ([string]$t.State -eq 'Disabled') { Write-Log "Windows-Aufgabe '\AK\$n' ist schon deaktiviert - bleibt so (wird danach nicht aktiviert)."; continue }
+        Disable-ScheduledTask -TaskPath '\AK\' -TaskName $n | Out-Null
+        $disabled.Add($n)
+        Write-Log "Windows-Aufgabe '\AK\$n' deaktiviert (fuer die Dauer der Aktualisierung)." 'Ok'
+    }
+    $script:SuspendedTasks = $disabled.ToArray()
+    $w = Wait-ProjectTasksIdle -Names $names -GetState { param($n) (Get-ScheduledTask -TaskPath '\AK\' -TaskName $n).State }
+    if (-not $w.Idle) {
+        throw ("Windows-Aufgabe(n) {0} laufen nach {1} s noch - abgebrochen, bevor etwas geaendert wurde (die Aufgaben werden wieder aktiviert). Spaeter erneut versuchen oder den laufenden Auftrag abwarten (php bin\console jobs:status)." -f ($w.Running -join ', '), $w.Seconds)
+    }
+    Write-Log ("Keine Windows-Aufgabe von {0} laeuft mehr ({1} s gewartet)." -f $Ordner, $w.Seconds) 'Ok'
+    return $disabled.ToArray()
+}
+
+function Resume-ProjectTasks {
+    param([string[]]$Names = @(), [string]$Why = '')
+    foreach ($n in @($Names)) {
+        try {
+            Enable-ScheduledTask -TaskPath '\AK\' -TaskName $n | Out-Null
+            Write-Log ("Windows-Aufgabe '\AK\{0}' wieder aktiviert{1}." -f $n, $(if ($Why) { " ($Why)" } else { '' })) 'Ok'
+        } catch {
+            Write-Log ("Windows-Aufgabe '\AK\{0}' konnte nicht aktiviert werden: {1} - bitte in der Aufgabenplanung von Hand aktivieren." -f $n, $_.Exception.Message) 'Error'
+        }
+    }
+    $script:SuspendedTasks = @()
+}
+
 function Start-TaskOnce {
     param([Parameter(Mandatory)][string]$Name)
     try {
@@ -4093,6 +4172,10 @@ function Test-Installation {
 function Get-StepPlan {
     param([Parameter(Mandatory)]$Plan)
     $s = New-Object System.Collections.Generic.List[object]
+    $paused = ($Plan.Mode -eq 'update' -or $Plan.Mode -eq 'repeat')
+    if ($paused) {
+        $s.Add(@{ Key = 'pause'; Title = 'Windows-Aufgaben anhalten (laufende abwarten)'; Fatal = $true })
+    }
     if ($Plan.Mode -eq 'update' -and -not $Plan.SkipBackup) {
         $s.Add(@{ Key = 'backup';  Title = 'Sicherung: pg_dump und config.php'; Fatal = $true })
     }
@@ -4114,6 +4197,9 @@ function Get-StepPlan {
         $s.Add(@{ Key = 'appkey'; Title = 'config.php: app.key nachtragen, falls er fehlt'; Fatal = $false })
     }
     $s.Add(@{ Key = 'migrate';  Title = 'php bin\console migrate'; Fatal = $true })
+    if ($paused) {
+        $s.Add(@{ Key = 'resume'; Title = 'Windows-Aufgaben wieder aktivieren, App-Pool starten'; Fatal = $false })
+    }
     $s.Add(@{ Key = 'dblocale'; Title = 'Datenbank: Locale fuer Suche und Sortierung pruefen'; Fatal = $false })
     if ($Plan.Mode -ne 'update') {
         $s.Add(@{ Key = 'admin';  Title = 'php bin\console user:create (Administrator)'; Fatal = $true })
@@ -4214,15 +4300,21 @@ function Invoke-Installation {
                     'code' {
                         if (-not (Test-Path -LiteralPath $Plan.ProgRoot)) { New-Item -ItemType Directory -Path $Plan.ProgRoot -Force | Out-Null }
                         if ($Plan.Source) {
+                            # Aktualisieren: App-Pool bleibt bis nach migrate aus (IIS antwortet 503),
+                            # damit keine Anfrage halb kopierten Code oder eine halb migrierte Datenbank sieht
                             if ($Plan.Mode -eq 'update') { $poolStopped = Stop-ProjectPool -Name $Plan.Ordner }
                             Copy-ProgramCode -Source $Plan.Source.Root -Target $Plan.ProgDir
-                            if ($poolStopped) { Start-ProjectPool -Name $Plan.Ordner; $poolStopped = $false }
                         } else {
                             Write-Log "Programmordner bleibt unverändert: $($Plan.ProgDir)" 'Ok'
                         }
                     }
                     'folders'  { New-DataFolders -Plan $Plan }
-                    'iis'      { Set-ProjectSite -Plan $Plan }
+                    'iis'      { Set-ProjectSite -Plan $Plan -KeepPoolStopped:$poolStopped }
+                    'pause'    { Suspend-ProjectTasks -Ordner $Plan.Ordner | Out-Null }
+                    'resume' {
+                        Resume-ProjectTasks -Names @($script:SuspendedTasks)
+                        if ($poolStopped) { Start-ProjectPool -Name $Plan.Ordner; $poolStopped = $false }
+                    }
                     'acl'      { Set-ProjectAcls -Plan $Plan }
                     'firewall' { Set-ProjectFirewallRule -Plan $Plan }
                     'db' {
@@ -4403,6 +4495,7 @@ function Invoke-Installation {
         Write-Log ("=== {0} {1} ===" -f $inst.Display, $(if ($script:AbortRequested) { 'abgebrochen' } else { 'fehlgeschlagen' })) $(if ($script:AbortRequested) { 'Warn' } else { 'Error' })
         return $false
     } finally {
+        if (@($script:SuspendedTasks).Count -gt 0) { Resume-ProjectTasks -Names @($script:SuspendedTasks) -Why 'nach Fehler bzw. Abbruch' }
         if ($poolStopped) { try { Start-ProjectPool -Name $Plan.Ordner } catch { } }
         Set-Busy $false
     }

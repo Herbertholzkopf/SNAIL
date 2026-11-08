@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern', '$script:TaskWaitSeconds')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -1079,6 +1079,39 @@ Test-Case 'Hinweis nach Update: aus der Liste ConfigAutoKeys, nennt alle Schlues
     Assert ($n -cmatch '^[\x20-\x7E]+$') "nur ASCII: $n"
     Assert (-not $script:PhpConfigState.Contains('__SNAIL_KEYS__')) 'Platzhalter ersetzt'
     Assert ($script:PhpConfigState.Contains("['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb']")) 'Liste im PHP-Code'
+}
+Test-Case 'Windows-Aufgaben (7.11): Auswahl nach Ordner, Warten mit Zeitlimit, Schritte nur bei Aktualisieren/Wiederholen' {
+    $names = @('projekt Aufgabenplanung', 'projekt-beispiel Aufgabenplanung', 'projekt Sicherung', 'olaf Aufgabenplanung', 'PROJEKT Nachtlauf', 'projektx Aufgabenplanung')
+    Assert-Equal 'projekt Aufgabenplanung,projekt Sicherung,PROJEKT Nachtlauf' ((Select-ProjectTaskNames -Names $names -Ordner 'projekt') -join ',')
+    Assert-Equal 'projekt-beispiel Aufgabenplanung' ((Select-ProjectTaskNames -Names $names -Ordner 'projekt-beispiel') -join ',')
+    Assert-Equal 0 @(Select-ProjectTaskNames -Names @() -Ordner 'projekt').Count
+    # laeuft zweimal, dann Ready
+    $script:cnt = 0
+    $w = Wait-ProjectTasksIdle -Names @('a') -GetState { param($n) $script:cnt++; if ($n -and $script:cnt -le 2) { 'Running' } else { 'Ready' } } -TimeoutSec 10 -PollMs 100
+    Assert $w.Idle 'wird frei'; Assert-Equal 3 $script:cnt
+    $w = Wait-ProjectTasksIdle -Names @('a', 'b') -GetState { param($n) if ($n -eq 'b') { 'Running' } else { 'Disabled' } } -TimeoutSec 1 -PollMs 100
+    Assert (-not $w.Idle) 'Zeitlimit'; Assert-Equal 'b' ($w.Running -join ',')
+    Assert ((@($script:LogLines) -join ' ') -match 'Warte auf laufende Windows-Aufgabe') 'Protokoll'
+    $mk = { param($m) [pscustomobject]@{ Mode = $m; SkipBackup = $false; Source = $(if ($m -ne 'repeat') { 'zip' } else { $null }); Kind = $(if ($m -eq 'install') { 'new' } else { 'installed' }); Inst = [pscustomobject]@{ Firewall = $false }; DmsRole = 'local' } }
+    $keys = { param($p) (@(Get-StepPlan -Plan $p) | ForEach-Object { $_.Key }) -join ',' }
+    $u = & $keys (& $mk 'update')
+    Assert ($u -match '^pause,backup,code,') "Aktualisieren: zuerst pause, dann Sicherung und Code: $u"
+    Assert ($u -match 'migrate,resume,') "resume direkt nach migrate: $u"
+    $r = & $keys (& $mk 'repeat')
+    Assert ($r -match '^pause,code,' -and $r -match 'migrate,resume,') "Wiederholen: $r"
+    $i = & $keys (& $mk 'install')
+    Assert ($i -notmatch 'pause|resume') "Neuinstallation ohne pause/resume: $i"
+    $steps = @(Get-StepPlan -Plan (& $mk 'update'))
+    Assert (-not [bool]($steps | Where-Object { $_['Key'] -eq 'resume' } | Select-Object -First 1)['Fatal']) 'resume nicht fatal'
+    Assert ([bool]($steps | Where-Object { $_['Key'] -eq 'pause' } | Select-Object -First 1)['Fatal']) 'pause fatal (Abbruch vor jeder Aenderung)'
+}
+Test-Case 'Skript: Aufgaben auch nach Fehler wieder aktiv, App-Pool beim Aktualisieren bis nach migrate aus' {
+    $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true)
+    $try = $inv.Find({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] -and $n.Finally }, $true)
+    Assert ($try.Finally.Extent.Text -match 'Resume-ProjectTasks') 'finally aktiviert die Aufgaben wieder'
+    $site = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectSite' }, $true)
+    Assert ($site.Extent.Text -match 'KeepPoolStopped') 'Set-ProjectSite kann den Pool aus lassen'
+    Assert ($inv.Extent.Text -notmatch 'Copy-ProgramCode[^\r\n]*\r?\n\s*if \(\$poolStopped\) \{ Start-ProjectPool') 'kein Start direkt nach robocopy'
 }
 Test-Case 'Fertig: Hoehe der Knopfleiste nach der Zahl der Knoepfe (keine abgeschnittene Reihe)' {
     Assert-Equal 44 (Get-FinishButtonsHeight -Count 3 -Width 932) 'drei passen in eine Reihe'
