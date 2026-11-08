@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.9
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.10
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -139,7 +139,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.9'
+$script:AppVersion = '7.10'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -5087,11 +5087,13 @@ $script:LblNextSteps = New-Label $script:PnlFinish 0 392 $pw 22 'Nächste Schrit
 $script:FlowFinish = New-Object System.Windows.Forms.FlowLayoutPanel
 $script:FlowFinish.Location      = New-Object System.Drawing.Point(0, 418)
 $script:FlowFinish.Size          = New-Object System.Drawing.Size($pw, ($ph - 418))
-$script:FlowFinish.Anchor        = 'Top,Left,Right,Bottom'
+$script:FlowFinish.Anchor        = 'Top,Left,Right'
 $script:FlowFinish.FlowDirection = 'LeftToRight'
 $script:FlowFinish.WrapContents  = $true
 $script:FlowFinish.AutoScroll    = $true
 $script:PnlFinish.Controls.Add($script:FlowFinish)
+# Viele Zeilen (Geheimnisse, Hinweise) schieben die Knoepfe nach unten: die Seite scrollt dann
+$script:PnlFinish.AutoScroll = $true
 
 function Add-FinishButton {
     param([string]$Text, [scriptblock]$OnClick, [switch]$Accent)
@@ -5297,7 +5299,6 @@ function Initialize-FinishPage {
 
     $script:LblNextSteps.Top = $y
     $script:FlowFinish.Top = $y + 26
-    $script:FlowFinish.Height = [math]::Max(80, $ph - $script:FlowFinish.Top)
     $script:FlowFinish.Controls.Clear()
     Add-FinishButton -Accent -Text "Anwendung öffnen: $($r.Url)" -OnClick { Open-InBrowser $script:Result.Url }
     if ($r.Url -ne $r.Local) { Add-FinishButton -Text "Lokal öffnen: $($r.Local)" -OnClick { Open-InBrowser $script:Result.Local } }
@@ -5308,6 +5309,19 @@ function Initialize-FinishPage {
         Show-Page 'select'
         Update-ProjectList
     }
+    # Hoehe nach der Zahl der Knoepfe statt bis zum Seitenende - sonst schnitt
+    # die Seite die letzte Reihe ("Zur Auswahl") ab, wenn oben viel stand
+    $script:FlowFinish.Height = Get-FinishButtonsHeight -Count $script:FlowFinish.Controls.Count -Width $script:FlowFinish.ClientSize.Width
+    $script:PnlFinish.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
+}
+
+# Hoehe der Knopfleiste auf "Fertig": Knoepfe 300 x 32 mit Rand 10 rechts / 8 unten
+function Get-FinishButtonsHeight {
+    param([int]$Count, [int]$Width)
+    if ($Count -le 0) { return 0 }
+    $perRow = [math]::Max(1, [math]::Floor(([math]::Max($Width, 1) + 10) / 310))
+    $rows = [math]::Ceiling($Count / $perRow)
+    return [int]($rows * 40 + 4)
 }
 
 # ==============================================================================

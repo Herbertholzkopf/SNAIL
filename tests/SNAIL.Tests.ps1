@@ -1080,6 +1080,13 @@ Test-Case 'Hinweis nach Update: aus der Liste ConfigAutoKeys, nennt alle Schlues
     Assert (-not $script:PhpConfigState.Contains('__SNAIL_KEYS__')) 'Platzhalter ersetzt'
     Assert ($script:PhpConfigState.Contains("['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb']")) 'Liste im PHP-Code'
 }
+Test-Case 'Fertig: Hoehe der Knopfleiste nach der Zahl der Knoepfe (keine abgeschnittene Reihe)' {
+    Assert-Equal 44 (Get-FinishButtonsHeight -Count 3 -Width 932) 'drei passen in eine Reihe'
+    Assert-Equal 84 (Get-FinishButtonsHeight -Count 6 -Width 932) 'sechs Knoepfe: zwei Reihen'
+    Assert-Equal 124 (Get-FinishButtonsHeight -Count 6 -Width 620) 'zwei je Reihe: drei Reihen'
+    Assert-Equal 244 (Get-FinishButtonsHeight -Count 6 -Width 100) 'schmal: einer je Reihe'
+    Assert-Equal 0 (Get-FinishButtonsHeight -Count 0 -Width 932)
+}
 Test-Case 'Symbole: archive/box im 24er-Raster, Katalog-Icons gezeichnet oder Buchstabe, Farbe aus tone' {
     foreach ($n in @('archive', 'box')) {
         Assert $script:TileIcons.ContainsKey($n) $n
