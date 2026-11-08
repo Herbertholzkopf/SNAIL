@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.10“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.11“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.10.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.11.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -302,6 +302,21 @@ Braucht werner (Katalog „werner“, `anmeldestelle`) und ein zweites Programm 
 | 18.12 | Programm ohne DMS: Katalog „Renate“ → neuer Mandant `ohnedms` → „Installieren“ | ℹ „Kein DMS …“; **kein** Schritt Programm-Token; `'mode' => 'local'` in der config.php; Anmeldung mit `admin` wie bisher |
 | 18.13 | werner stoppen (`$appcmd stop site werner-a5`) → Renate „Einrichtung wiederholen“ → werner wieder starten | `check` meldet ⚠ „DMS nicht erreichbar …“ → Hinweis auf „Fertig“, Lauf endet nicht mit Fehler; Token bleibt (kein api:token im Protokoll) |
 | 18.14 | In `C:\AK\services.json` beim werner-Eintrag `a5` die `local_url` auf einen falschen Port setzen (z. B. 21199) → Renate „Einrichtung wiederholen“ → danach Wert zurück | Schritt Programm-Token ⚠ „… check es ablehnt: local_url/Adresse des DMS veraltet …“ bzw. bei unerreichbarem Port ⚠ „DMS nicht erreichbar“; **kein** `api:token` im Protokoll, `api:tokens` unverändert |
+
+## 19 Windows-Aufgaben und App-Pool beim Aktualisieren (SNAIL 7.11)
+
+`$task` meint `Get-ScheduledTask -TaskPath '\AK\' | Select TaskName, State`.
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 19.1 | Vorher: `$task` | `projekt Aufgabenplanung` (und ggf. weitere `projekt …`) `Ready` |
+| 19.2 | A aktualisieren (ZIP wie in 5); währenddessen in zweiter Konsole `$task` und `$appcmd list apppool projekt` | erster Schritt „Windows-Aufgaben anhalten (laufende abwarten)“ ✓, Protokoll „Windows-Aufgabe '\AK\projekt Aufgabenplanung' deaktiviert …“, „Keine Windows-Aufgabe von projekt laeuft mehr (N s gewartet).“; während Code bis migrate: Aufgabe `Disabled`, App-Pool `Stopped`, Website antwortet 503; andere Installationen (`projekt-beispiel …`) bleiben `Ready` |
+| 19.3 | nach dem Lauf: `$task`, App-Pool | Schritt „Windows-Aufgaben wieder aktivieren, App-Pool starten“ ✓ direkt nach migrate; Aufgabe `Ready`, App-Pool `Started`, Anwendung erreichbar |
+| 19.4 | Lange laufende Aufgabe: `Start-ScheduledTask -TaskPath '\AK\' -TaskName 'projekt Aufgabenplanung'` direkt vor „Aktualisieren“ (bzw. einen langen Auftrag einstellen) | Protokoll „Warte auf laufende Windows-Aufgabe(n): projekt Aufgabenplanung (… s von hoechstens 300 s)“, danach geht es weiter; SNAIL beendet die Aufgabe nicht |
+| 19.5 | Abbruch nach Zeitlimit (nur wenn sich eine Aufgabe > 300 s halten lässt) | ✗ „… laufen nach 300 s noch - abgebrochen, bevor etwas geaendert wurde …“; danach Aufgabe wieder `Ready`, App-Pool läuft, Code und Datenbank unverändert |
+| 19.6 | Fehler mitten im Lauf (wie 7.5 mit kaputter Migration, hier beim Aktualisieren) | Protokoll „Windows-Aufgabe '\AK\projekt Aufgabenplanung' wieder aktiviert (nach Fehler bzw. Abbruch).“; App-Pool wieder gestartet |
+| 19.7 | Aufgabe vorher von Hand deaktivieren → „Einrichtung wiederholen“ | Protokoll „… ist schon deaktiviert - bleibt so …“; danach weiter `Disabled` (bis der Schritt „Windows-Aufgabe anlegen“ sie neu anlegt – das ist das Verhalten von aufgabe_erstellen.ps1) |
+| 19.8 | Neuinstallation | **kein** Schritt „Windows-Aufgaben anhalten“ |
 
 ## Ergebnis festhalten
 

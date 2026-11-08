@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.10**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.11**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -53,8 +53,9 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 
 | Schritt | Neuinstallation / Wiederholen | Aktualisieren |
 |---|---|---|
+| Windows-Aufgaben anhalten | Wiederholen: wie Aktualisieren | **erster Schritt** (seit 7.11): Aufgaben unter `\AK\` mit Namen `<Ordner> Aufgabenplanung` bzw. `<Ordner> …` deaktivieren, laufende Exemplare abwarten (höchstens 300 s, nie hart beenden). Läuft danach noch eine, bricht SNAIL ab, **bevor** etwas geändert ist. Nach `migrate` wieder aktivieren – auch nach Fehler oder Abbruch (`finally`); eine vom Admin deaktivierte Aufgabe bleibt aus |
 | Sicherung | – | `pg_dump -Fc` + Kopie der `config.php` nach `<Datenordner>\Sicherung\<Zeit>\` (nur Administratoren/SYSTEM). Abwählbar nur mit dem Pflicht-Häkchen „Ich habe eine andere funktionierende Sicherung (z. B. Veeam/VM-Sicherung)“ – steht im Protokoll |
-| Programmcode | ZIP in einen Temp-Ordner außerhalb von `C:\AK` entpacken, Projektstamm erkennen (Ordner mit `bin\console` und `public\index.php`, auch bei doppelter Verschachtelung), mit `robocopy /MIR` nach `C:\AK\<Ordner>`, Temp-Ordner löschen | App-Pool anhalten, `robocopy /MIR … /XF C:\AK\<Ordner>\config.php` (voller Pfad!), App-Pool starten |
+| Programmcode | ZIP in einen Temp-Ordner außerhalb von `C:\AK` entpacken, Projektstamm erkennen (Ordner mit `bin\console` und `public\index.php`, auch bei doppelter Verschachtelung), mit `robocopy /MIR` nach `C:\AK\<Ordner>`, Temp-Ordner löschen | App-Pool anhalten, `robocopy /MIR … /XF C:\AK\<Ordner>\config.php` (voller Pfad!); der App-Pool bleibt **bis nach `migrate`** aus (IIS antwortet 503), damit keine Anfrage halb kopierten Code oder eine halb migrierte Datenbank sieht. `app_offline.htm` hilft hier nicht – das kennt nur das ASP.NET Core Module, nicht FastCGI/PHP |
 | Datenordner | Data, Cache, Logs, Temp anlegen | fehlende ergänzen (Pfade aus der `config.php`) |
 | IIS | App-Pool (kein verwalteter Code, ApplicationPoolIdentity), Website auf `<Ordner>\public`, Binding `http *:<port>:` **nur beim Anlegen**, anonyme Anfragen als App-Pool-Benutzer (`userName=""`), Upload-Grenze je Website (`/commit:apphost`) | angleichen – **Bindings einer vorhandenen Website fasst SNAIL nie an** |
 | Rechte | Programmordner, Datenordner, `C:\AK` (siehe [Rechte](#rechte)) | angleichen |
