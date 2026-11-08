@@ -3188,6 +3188,59 @@ function New-DmsProgramToken {
     return $sel.Token
 }
 
+<#
+ Programmzugriff im DMS (Vorlage v1.24, docs/03 Schritt 3a): allen aktiven
+ Admins des DMS Zugriff auf das Programm geben -
+   php bin\console dms:programmzugriff <dienst> --installation=<mandant> --admins
+ im Ordner des DMS. stdout je Benutzer "gegeben: <login>" | "bestand: <login>" |
+ "unbekannt: <login>" (ins Protokoll, keine Geheimnisse), Hinweise auf stderr,
+ Exit 0/1. Nur nach einem neu ausgestellten Token (Neuinstallation bzw.
+ erneuert); beim Wiederholen mit behaltenem Token nicht - ein von Hand
+ entfernter Zugriff bleibt die Entscheidung des Admins. Nicht fatal.
+#>
+function Grant-DmsProgramAccess {
+    param([Parameter(Mandatory)]$Dms, [Parameter(Mandatory)][string]$PhpExe, [Parameter(Mandatory)][string]$Service, [Parameter(Mandatory)][string]$Installation)
+    $console = Join-Path (Join-Path $Dms.ProgDir 'bin') 'console'
+    $res = [pscustomobject]@{ Ok = $false; Given = @(); Existing = @(); Unknown = @(); Text = '' }
+    if (-not (Test-Path -LiteralPath $console)) { $res.Text = "Konsole des DMS nicht gefunden: $console"; return $res }
+    Write-Log ("php bin\console dms:programmzugriff {0} --installation={1} --admins im Ordner des DMS {2}" -f $Service, $Installation, $Dms.ProgDir)
+    try {
+        $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs @($console, 'dms:programmzugriff', $Service, "--installation=$Installation", '--admins')) -WorkingDirectory $Dms.ProgDir -Utf8Output -TimeoutSec 120
+    } catch {
+        $res.Text = 'dms:programmzugriff: ' + $_.Exception.Message
+        return $res
+    }
+    $p = ConvertFrom-DmsAccessOutput -Output ([string]$r.Output)
+    $res.Given = $p.Given; $res.Existing = $p.Existing; $res.Unknown = $p.Unknown
+    foreach ($l in $p.Lines) { Write-Log ('  ' + $l) }
+    $errLines = @(([string]$r.Error) -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+    foreach ($l in $errLines) { Write-Log ('  ' + $l.Trim()) $(if ($r.ExitCode -eq 0) { 'Info' } else { 'Warn' }) }
+    $n = $p.Given.Count + $p.Existing.Count
+    if ($r.ExitCode -eq 0) {
+        $res.Ok = $true
+        $res.Text = ("Programmzugriff im DMS: {0} Admin(s) ({1} neu, {2} bestand)." -f $n, $p.Given.Count, $p.Existing.Count)
+    } else {
+        $why = if ($errLines.Count -gt 0) { $errLines[-1].Trim() } else { "Exit-Code $($r.ExitCode)" }
+        $res.Text = ("Programmzugriff im DMS nicht vollstaendig: {0} - in werner unter System -> Benutzer von Hand setzen (sonst ergibt die Anmeldung ueber das DMS 403)." -f $why)
+    }
+    return $res
+}
+
+# stdout von dms:programmzugriff zerlegen (eigene Funktion fuer die Tests)
+function ConvertFrom-DmsAccessOutput {
+    param([AllowEmptyString()][string]$Output)
+    $given = @(); $existing = @(); $unknown = @(); $lines = @()
+    foreach ($l in @(([string]$Output) -split "`r?`n")) {
+        $t = $l.TrimStart([char]0xFEFF).Trim()
+        if ($t -eq '') { continue }
+        $lines += $t
+        if ($t -match '^gegeben:\s*(.+)$') { $given += $Matches[1].Trim() }
+        elseif ($t -match '^bestand:\s*(.+)$') { $existing += $Matches[1].Trim() }
+        elseif ($t -match '^unbekannt:\s*(.+)$') { $unknown += $Matches[1].Trim() }
+    }
+    return [pscustomobject]@{ Given = $given; Existing = $existing; Unknown = $unknown; Lines = $lines }
+}
+
 # Token-artige Teile einer Zeile unkenntlich machen (fuer Protokoll und Meldungen)
 function Hide-ProgramToken {
     param([AllowEmptyString()][string]$Text)
@@ -4107,6 +4160,7 @@ function Invoke-Installation {
         Admin = $null; Migrations = $null; Check = $null; Rows = @(); CredFile = $null; Backup = $null; BackupSkipped = $false; Verify = $null
         AppKey = [pscustomobject]@{ Status = ''; Key = ''; Changed = @(); Backup = ''; Text = '' }
         DmsToken = [pscustomobject]@{ Status = ''; Value = ''; Generated = $false; Backup = ''; Text = '' }
+        DmsAccess = $null
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $steps = Get-StepPlan -Plan $Plan
@@ -4250,6 +4304,18 @@ function Invoke-Installation {
                             Write-Log $t.Text $(if ($t.Status -eq 'manual' -or $isWarn) { 'Warn' } else { 'Ok' })
                             if ($t.Status -eq 'manual') { $rows.Add(@{ Level = 'Error'; Name = 'Programm-Token'; Text = $t.Text }); $state = 'Failed' }
                             elseif ($isWarn) { $rows.Add(@{ Level = 'Warn'; Name = 'Programm-Token'; Text = $t.Text }); $state = 'Warn' }
+                        }
+                        # Programmzugriff fuer die Admins des DMS - nur nach einem neu ausgestellten Token
+                        if ($script:Result.DmsToken.Generated -and $Plan.Dms) {
+                            $g = Grant-DmsProgramAccess -Dms $Plan.Dms -PhpExe $Plan.PhpExe -Service $Plan.Inst.Service.Key -Installation $Plan.Inst.Key
+                            $script:Result.DmsAccess = $g
+                            Write-Log $g.Text $(if ($g.Ok) { 'Ok' } else { 'Warn' })
+                            if (-not $g.Ok) {
+                                $rows.Add(@{ Level = 'Warn'; Name = 'Programmzugriff im DMS'; Text = $g.Text })
+                                if ($state -eq 'Done') { $state = 'Warn' }
+                            }
+                        } else {
+                            Write-Log 'Programmzugriff im DMS: unveraendert (Token behalten - die Zugriffe verwaltet der Admin im DMS).'
                         }
                     }
                     'migrate' {
@@ -5180,6 +5246,10 @@ function Get-FinishAccess {
             $lines.Add($(if ($dt.PSObject.Properties['Warn'] -and $dt.Warn) { 'Prog.-Token: vorhanden, unveraendert (check lehnt es ab - siehe Hinweise unten)' } else { 'Prog.-Token: vorhanden, vom DMS angenommen (unveraendert)' }))
         }
         if ($dt.Backup) { $lines.Add(("Vorher     : {0}   (config.php vor dem neuen Programm-Token, enthaelt das DB-Passwort)" -f $dt.Backup)) }
+    }
+    if ($r.DmsAccess) {
+        $da = $r.DmsAccess
+        $lines.Add($(if ($da.Ok) { ("Zugriff DMS: Programmzugriff im DMS: {0} Admin(s)" -f (@($da.Given).Count + @($da.Existing).Count)) } else { 'Zugriff DMS: nicht vollstaendig gesetzt - siehe Hinweise unten' }))
     }
     if ($ak.Key -and @('new', 'added', 'manual') -contains $ak.Status) {
         $secrets.Add([pscustomobject]@{ Label = $(if ($ak.Status -eq 'manual') { 'app.key (Vorschlag)' } else { 'app.key' }); Value = [string]$ak.Key })
