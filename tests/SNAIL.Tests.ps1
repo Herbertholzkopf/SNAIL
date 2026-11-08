@@ -1080,6 +1080,13 @@ Test-Case 'Hinweis nach Update: aus der Liste ConfigAutoKeys, nennt alle Schlues
     Assert (-not $script:PhpConfigState.Contains('__SNAIL_KEYS__')) 'Platzhalter ersetzt'
     Assert ($script:PhpConfigState.Contains("['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb']")) 'Liste im PHP-Code'
 }
+Test-Case 'Fertig: Hoehe der Knopfleiste nach der Zahl der Knoepfe (keine abgeschnittene Reihe)' {
+    Assert-Equal 44 (Get-FinishButtonsHeight -Count 3 -Width 932) 'drei passen in eine Reihe'
+    Assert-Equal 84 (Get-FinishButtonsHeight -Count 6 -Width 932) 'sechs Knoepfe: zwei Reihen'
+    Assert-Equal 124 (Get-FinishButtonsHeight -Count 6 -Width 620) 'zwei je Reihe: drei Reihen'
+    Assert-Equal 244 (Get-FinishButtonsHeight -Count 6 -Width 100) 'schmal: einer je Reihe'
+    Assert-Equal 0 (Get-FinishButtonsHeight -Count 0 -Width 932)
+}
 Test-Case 'Symbole: archive/box im 24er-Raster, Katalog-Icons gezeichnet oder Buchstabe, Farbe aus tone' {
     foreach ($n in @('archive', 'box')) {
         Assert $script:TileIcons.ContainsKey($n) $n
@@ -1227,6 +1234,24 @@ Test-Case 'Get-DmsPlan: kein Rueckfall auf ein anderes DMS, mehrere DMS -> Katal
     $p = Get-DmsPlan -Target (New-A5Target 'hildegard' 'x') -Instances $broken -Catalog $catalog.ServiceList
     Assert-Equal 'local' $p.Role
     Assert (@($p.Hints | Where-Object { $_.Level -eq 'Warn' -and $_.Text -match 'werner-x ist nicht lesbar' }).Count -eq 1) (($p.Hints | ForEach-Object { $_.Text }) -join ' | ')
+}
+Test-Case 'dms:programmzugriff: Ausgabe zerlegen (gegeben, bestand, unbekannt, BOM, Hinweise ignoriert)' {
+    $p = ConvertFrom-DmsAccessOutput -Output ([string][char]0xFEFF + "gegeben: admin`r`nbestand: chefin`nunbekannt: gibtsnicht`n`nirgendwas`n")
+    Assert-Equal 'admin' ($p.Given -join ','); Assert-Equal 'chefin' ($p.Existing -join ','); Assert-Equal 'gibtsnicht' ($p.Unknown -join ',')
+    Assert-Equal 4 @($p.Lines).Count
+    Assert-Equal 0 @((ConvertFrom-DmsAccessOutput -Output '').Given).Count
+    $res = New-TestResult
+    $res.DmsAccess = [pscustomobject]@{ Ok = $true; Given = @('admin'); Existing = @('chefin'); Unknown = @(); Text = '' }
+    Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'Programmzugriff im DMS: 2 Admin\(s\)') 'Fertig'
+    $res.DmsAccess = [pscustomobject]@{ Ok = $false; Given = @(); Existing = @(); Unknown = @(); Text = 'x' }
+    Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'nicht vollstaendig') 'Fertig bei Fehler'
+}
+Test-Case 'Skript: dms:programmzugriff nur nach einem neu ausgestellten Token (nicht beim behaltenen)' {
+    $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Grant-DmsProgramAccess' }, $true))
+    Assert-Equal 1 $calls.Count 'genau ein Aufruf'
+    $p = $calls[0].Parent
+    while ($p -and $p -isnot [System.Management.Automation.Language.IfStatementAst]) { $p = $p.Parent }
+    Assert ($p -and $p.Clauses[0].Item1.Extent.Text -match 'DmsToken\.Generated') ('Bedingung: ' + $(if ($p) { $p.Clauses[0].Item1.Extent.Text } else { 'keine' }))
 }
 Test-Case 'api:token-Ausgabe: Token mit BOM/Leerraum, weitere stdout-Zeilen als Warnung (unkenntlich), keine oder mehrere -> kein Token' {
     $tok = 'pt1_' + ('a' * 21) + '-_' + ('B' * 20)
@@ -1567,6 +1592,18 @@ if (-not $PgPassword) {
             Assert (-not (($script:LogLines -join "`n").Contains($tok))) 'Token nicht im Protokoll'
             $cf = Save-InstallCredentials -Plan $appPlan -Values @{ program_token = $tok }
             Assert-Equal $tok (Read-KeyValueFile $cf)['program_token'] 'Zugangsdatei'
+        }
+        Test-Case 'dms:programmzugriff (echt): Admin des DMS bekommt Zugriff, zweiter Lauf bestand, fremde Installation -> Warnung' {
+            $g = Grant-DmsProgramAccess -Dms $dmsRef -PhpExe $PhpExe -Service 'renate' -Installation $appInst.Key
+            Assert $g.Ok $g.Text
+            Assert (@($g.Given).Count -ge 1) ('gegeben: ' + ($g.Given -join ',') + ' | ' + $g.Text)
+            Assert ($g.Text -match 'Programmzugriff im DMS: \d+ Admin') $g.Text
+            $g2 = Grant-DmsProgramAccess -Dms $dmsRef -PhpExe $PhpExe -Service 'renate' -Installation $appInst.Key
+            Assert ($g2.Ok -and @($g2.Given).Count -eq 0 -and @($g2.Existing).Count -eq @($g.Given).Count) ('idempotent: ' + $g2.Text)
+            $g3 = Grant-DmsProgramAccess -Dms $dmsRef -PhpExe $PhpExe -Service 'renate' -Installation 'fremd'
+            Assert (-not $g3.Ok -and $g3.Text -match 'nicht vollstaendig') $g3.Text
+            $g4 = Grant-DmsProgramAccess -Dms $dmsRef -PhpExe $PhpExe -Service 'gibtsnicht' -Installation $appInst.Key
+            Assert (-not $g4.Ok) 'unbekanntes Programm'
         }
         Test-Case 'Wiederholen: gueltiges Token bleibt (kein api:token), abgelehntes wird ersetzt (Sicherung, check wieder ok)' {
             $before = [System.IO.File]::ReadAllBytes((Join-Path $appProg 'config.php'))
