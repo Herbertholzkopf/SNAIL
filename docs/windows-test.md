@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.11“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.11.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.0.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -317,6 +317,25 @@ Braucht werner (Katalog „werner“, `anmeldestelle`) und ein zweites Programm 
 | 19.6 | Fehler mitten im Lauf (wie 7.5 mit kaputter Migration, hier beim Aktualisieren) | Protokoll „Windows-Aufgabe '\AK\projekt Aufgabenplanung' wieder aktiviert (nach Fehler bzw. Abbruch).“; App-Pool wieder gestartet |
 | 19.7 | Aufgabe vorher von Hand deaktivieren → „Einrichtung wiederholen“ | Protokoll „… ist schon deaktiviert - bleibt so …“; danach weiter `Disabled` (bis der Schritt „Windows-Aufgabe anlegen“ sie neu anlegt – das ist das Verhalten von aufgabe_erstellen.ps1) |
 | 19.8 | Neuinstallation | **kein** Schritt „Windows-Aufgaben anhalten“ |
+
+## 20 Kaltstart vermeiden (SNAIL 7.12)
+
+`$pool` meint `& $appcmd list apppool projekt /config:*`, `$init` meint `& $appcmd list config projekt -section:system.webServer/applicationInitialization`.
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 20.1 | Vorher (WIPP-Stand): `Get-WindowsFeature Web-AppInit` bzw. `Test-Path $env:windir\System32\inetsrv\warmup.dll` | notieren; fehlt es, erwartet 20.3 eine Warnung |
+| 20.2 | „Prüfen“ für A | Zeilen „Kaltstart“: App-Pool-Werte (vor dem ersten 7.12-Lauf Warnung „startMode OnDemand, Leerlauf-Ende nach 00:20:00, Recycling nach Laufzeit 1.05:00:00 …“), Application Initialization vorhanden/fehlt, FastCGI `idleTimeout`/`instanceMaxRequests`/`PHP_FCGI_MAX_REQUESTS` (Warnung, solange WIPP sie nicht gesetzt hat); Zeile „OPcache“ (Warnung „… weicht ab, WIPP (ab 1.11.4) erneut laufen lassen“ mit den abweichenden Werten oder „an, 256 MB, 20000 Dateien, ohne file_cache“) |
+| 20.3 | A aktualisieren | Schritt „IIS: Kaltstart vermeiden …“ ✓ direkt nach IIS; Protokoll „App-Pool 'projekt': kein Beenden im Leerlauf, startMode AlwaysRunning, Recycling nur noch taeglich um 03:MM.“ und „Website 'projekt': preloadEnabled, Aufwaermen ueber /aufwaermen …“ (Vorlage vor 1.64: `/login`) (ohne Feature: ⚠ mit Hinweis auf WIPP, Lauf geht weiter) |
+| 20.4 | `$pool` | `startMode="AlwaysRunning"`, `idleTimeout="00:00:00"`, `periodicRestart time="00:00:00"`, unter `<schedule>` genau **ein** `<add value="03:MM:00" />` |
+| 20.5 | `& $appcmd list site projekt /config:*` und `& $appcmd list app "projekt/" /config:*`; `$init` | `preloadEnabled="true"` an Site-Vorgaben und Anwendung; `doAppInitAfterRestart="true"`, genau ein `initializationPage="/aufwaermen"` (bzw. `/login` bei Vorlage vor 1.64); `Invoke-WebRequest http://localhost:<port>/aufwaermen` → 200, JSON `success:true`, kein Cookie; der Eintrag steht in `C:\Windows\System32\inetsrv\config\applicationHost.config` (`<location path="projekt">`), **nicht** in `public\web.config` |
+| 20.6 | Noch einmal „Einrichtung wiederholen“, dann 20.4/20.5 | unverändert, keine doppelten Einträge |
+| 20.7 | Von Hand `& $appcmd set apppool projekt /+recycling.periodicRestart.schedule.[value='02:00:00']`, wiederholen | 02:00 wieder entfernt, nur 03:MM bleibt |
+| 20.7a | Programm mit Vorlage vor 1.64 erst einrichten, dann auf ≥ 1.64 aktualisieren | erst `/login`, nach dem Aktualisieren genau ein `/aufwaermen` |
+| 20.8 | B einrichten bzw. aktualisieren | anderer Zeitpunkt 03:MM als A (je Ordner versetzt) |
+| 20.9 | `iisreset`, dann 30 s warten und **ohne** vorherigen Aufruf im Browser die Startseite öffnen; Zeit im Netzwerk-Tab | `w3wp.exe` für den Pool läuft schon vor dem ersten Aufruf (Task-Manager, Benutzer = App-Pool), erste Seite schnell (kein Kaltstart von ~5 s) |
+| 20.10 | Leerlauf > 20 min (bzw. über Nacht), dann erste Seite | schnell; `w3wp.exe` mit derselben PID wie vorher (bis zum Recycling um 03:MM) |
+| 20.11 | Ereignisanzeige → Windows-Protokolle → System, Quelle WAS, nach 03:MM | ein Recycling-Eintrag „… geplanter Zeitpunkt“ je Pool, nicht mehr alle 29 h |
 
 ## Ergebnis festhalten
 

@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.11**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.12**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -58,6 +58,7 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | Programmcode | ZIP in einen Temp-Ordner außerhalb von `C:\AK` entpacken, Projektstamm erkennen (Ordner mit `bin\console` und `public\index.php`, auch bei doppelter Verschachtelung), mit `robocopy /MIR` nach `C:\AK\<Ordner>`, Temp-Ordner löschen | App-Pool anhalten, `robocopy /MIR … /XF C:\AK\<Ordner>\config.php` (voller Pfad!); der App-Pool bleibt **bis nach `migrate`** aus (IIS antwortet 503), damit keine Anfrage halb kopierten Code oder eine halb migrierte Datenbank sieht. `app_offline.htm` hilft hier nicht – das kennt nur das ASP.NET Core Module, nicht FastCGI/PHP |
 | Datenordner | Data, Cache, Logs, Temp anlegen | fehlende ergänzen (Pfade aus der `config.php`) |
 | IIS | App-Pool (kein verwalteter Code, ApplicationPoolIdentity), Website auf `<Ordner>\public`, Binding `http *:<port>:` **nur beim Anlegen**, anonyme Anfragen als App-Pool-Benutzer (`userName=""`), Upload-Grenze je Website (`/commit:apphost`) | angleichen – **Bindings einer vorhandenen Website fasst SNAIL nie an** |
+| Kaltstart vermeiden | App-Pool `processModel.idleTimeout` 0, `startMode` AlwaysRunning, kein Recycling nach Laufzeit (`periodicRestart.time` 0), dafür genau ein Zeitpunkt täglich `03:MM` (MM aus dem Ordnernamen, je Programm versetzt, stabil); Website/Anwendung `preloadEnabled`, `applicationInitialization` mit `doAppInitAfterRestart` und Aufwärm-URL `/aufwaermen` (steht sie nicht in `config\routes.php` – Vorlage vor 1.64 –, dann `/login`) (in der `applicationHost.config`, nicht in `public\web.config`). Seit 7.12, nicht fatal | gleich (idempotent: fremde Zeitpunkte und Aufwärm-URLs werden ersetzt). Beim Aktualisieren bleibt der Pool dabei aus; er startet nach `migrate` und wärmt sich dann auf |
 | Rechte | Programmordner, Datenordner, `C:\AK` (siehe [Rechte](#rechte)) | angleichen |
 | Firewall | nur auf Wunsch: Regel `SNAIL <Ordner> (TCP <port>)` | – |
 | PostgreSQL | Rolle und Datenbank (siehe [PostgreSQL](#postgresql)) | – |
@@ -344,6 +345,18 @@ Programme mit `auth.mode = dms` rufen KI nur über werner auf (Vorlage `docs/03`
 | `max_execution_time` | Vorgabe | Vorgabe | nichts (die Anwendungen setzen es je Aufruf) |
 
 `memory_limit` und `max_input_time` liest SNAIL mit `php.exe`; das ist dieselbe php.ini wie für `php-cgi.exe`, wenn beide im selben Ordner liegen (prüft `windows-pruefung.ps1`). Globale IIS- und PHP-Werte gehören zu WIPP, SNAIL ändert sie nicht. Der Vertrag mit den Projekten (`services.json`, Konsolenausgaben, `config.example.php`) bleibt unverändert.
+
+## Kaltstart (SNAIL 7.12)
+
+Ohne Einstellungen beendet IIS einen App-Pool nach 20 min Leerlauf; die erste Seite danach braucht einige Sekunden (PHP-Prozesse starten, OPcache leer). SNAIL setzt je Programm den Schritt „Kaltstart vermeiden“ (siehe [Schritte](#schritte)). Global für alle Websites gelten:
+
+| Wert | Ziel | SNAIL |
+|---|---|---|
+| IIS-Feature Application Initialization (`warmup.dll`) | installiert | **installiert WIPP** (ab 1.11.4); SNAIL warnt auf „Prüfen“ und im Schritt, wenn es fehlt (dann setzt SNAIL nur App-Pool und `preloadEnabled`) |
+| FastCGI `idleTimeout` / `instanceMaxRequests` / `PHP_FCGI_MAX_REQUESTS` | ≥ 3600 / genau 10000 / genau 10000 | **setzt WIPP** (ab 1.11.4; ein von Hand höherer `idleTimeout` bleibt); SNAIL warnt auf „Prüfen“ (IIS-Standard 300 / 200) |
+| php.ini: `opcache.enable` 1, `memory_consumption` ≥ 256, `max_accelerated_files` ≥ 20000, `validate_timestamps` 1, `revalidate_freq` 60, `realpath_cache_size` ≥ 4096K, `realpath_cache_ttl` ≥ 600, **kein** `opcache.file_cache` | wie links | **setzt WIPP** (ab 1.11.4, Option „OPcache“; realpath und das Auskommentieren von `file_cache` immer); SNAIL liest die Werte mit `php.exe` (`ini_get`) und warnt auf „Prüfen“, `file_cache` gilt bei leerem `ini_get` als nicht gesetzt |
+
+Aufwärm-URL ist `GET /aufwaermen` (Vorlage ab 1.64, `Router::NO_SESSION`, schreibt nichts, übersetzt das ganze Programm in den OPcache; Antwort wertet IIS nicht aus). SNAIL nimmt sie, wenn sie in `config\routes.php` des Programms steht, sonst `/login`; beim nächsten Lauf nach einem Update der Vorlage wird umgestellt. Die Werte stehen auch in der Vorlage, `docs/03` „Kaltstart nach Leerlauf“, und `windows-pruefung.ps1` prüft sie. Der Vertrag mit den Programmen (`services.json`, Konsolenausgaben, `config.example.php`) ändert sich nicht.
 
 ## Sicherheitshinweise
 
