@@ -1906,7 +1906,16 @@ function Get-ExampleAudioMaxMb {
  Global (FastCGI idleTimeout/instanceMaxRequests, OPcache in der php.ini,
  IIS-Feature Application Initialization) setzt WIPP; SNAIL prueft nur.
 #>
-$script:WarmupPath = '/login'
+# Aufwaerm-URL: GET /aufwaermen (Vorlage ab 1.64, NO_SESSION, schreibt nichts, laedt das
+# ganze Programm in den OPcache); aeltere Staende kennen sie nicht -> /login
+$script:WarmupPath = '/aufwaermen'
+$script:WarmupFallback = '/login'
+function Get-WarmupPath {
+    param([string]$ProgDir)
+    $routes = if ($ProgDir) { Join-Path (Join-Path $ProgDir 'config') 'routes.php' } else { '' }
+    if ($routes -and (Test-Path -LiteralPath $routes -PathType Leaf) -and ([System.IO.File]::ReadAllText($routes) -match "['""]/aufwaermen['""]")) { return $script:WarmupPath }
+    return $script:WarmupFallback
+}
 $script:FastCgiWant = @{ IdleTimeout = 3600; InstanceMaxRequests = 10000 }
 $script:OpcacheWant = [ordered]@{
     'opcache.enable' = 1; 'opcache.memory_consumption' = 256; 'opcache.max_accelerated_files' = 20000
@@ -2003,15 +2012,16 @@ function Set-ProjectWarmup {
     $r = Invoke-AppCmd @('set', 'app', "$name/", '/preloadEnabled:true')
     if ($r.ExitCode -ne 0) { throw "preloadEnabled der Anwendung konnte nicht gesetzt werden: $($r.Output)" }
     if (-not (Test-AppInitInstalled)) {
-        $hints.Add('IIS-Feature Application Initialization fehlt (warmup.dll) - preloadEnabled bleibt ohne Wirkung, die erste Seite nach einem Neustart ist langsam. WIPP installiert es (Feature IIS-ApplicationInit).')
+        $hints.Add('IIS-Feature Application Initialization fehlt (warmup.dll) - preloadEnabled bleibt ohne Wirkung, die erste Seite nach einem Neustart ist langsam. WIPP (ab 1.11.4) installiert es (Feature IIS-ApplicationInit) - WIPP erneut laufen lassen.')
     } else {
         $sec = '-section:system.webServer/applicationInitialization'
         $pages = Get-AppInitPages ((Invoke-AppCmd @('list', 'config', $name, $sec)).Lines -join "`n")
-        foreach ($a in @(Get-AppInitEditArgs -Site $name -Current $pages -Want $script:WarmupPath)) {
+        $warmUrl = Get-WarmupPath -ProgDir $Plan.ProgDir
+        foreach ($a in @(Get-AppInitEditArgs -Site $name -Current $pages -Want $warmUrl)) {
             $r = Invoke-AppCmd $a
             if ($r.ExitCode -ne 0) { throw "Application Initialization konnte nicht eingestellt werden: $($r.Output)" }
         }
-        Write-Log ("Website '{0}': preloadEnabled, Aufwaermen ueber {1} nach jedem Start." -f $name, $script:WarmupPath) 'Ok'
+        Write-Log ("Website '{0}': preloadEnabled, Aufwaermen ueber {1} nach jedem Start." -f $name, $warmUrl) 'Ok'
     }
     return $hints.ToArray()
 }
@@ -2043,9 +2053,9 @@ function Get-FastCgiWarmCheck {
     $txt = "FastCGI: idleTimeout $idle s, instanceMaxRequests $max, PHP_FCGI_MAX_REQUESTS $(if ($envMax) { $envMax } else { '(nicht gesetzt)' })"
     $bad = @()
     if ($idle -lt $script:FastCgiWant.IdleTimeout) { $bad += "idleTimeout >= $($script:FastCgiWant.IdleTimeout)" }
-    if ($max -lt $script:FastCgiWant.InstanceMaxRequests) { $bad += "instanceMaxRequests >= $($script:FastCgiWant.InstanceMaxRequests)" }
-    if ($envMax -ne [string]$max) { $bad += 'PHP_FCGI_MAX_REQUESTS = instanceMaxRequests' }
-    if ($bad.Count -gt 0) { return [pscustomobject]@{ Level = 'Warn'; Text = "$txt - gegen Kaltstart empfohlen: $($bad -join ', ') (setzt WIPP global)." } }
+    if ($max -ne $script:FastCgiWant.InstanceMaxRequests) { $bad += "instanceMaxRequests = $($script:FastCgiWant.InstanceMaxRequests)" }
+    if ($envMax -ne [string]$script:FastCgiWant.InstanceMaxRequests) { $bad += "PHP_FCGI_MAX_REQUESTS = $($script:FastCgiWant.InstanceMaxRequests)" }
+    if ($bad.Count -gt 0) { return [pscustomobject]@{ Level = 'Warn'; Text = "$txt - weicht ab, gegen Kaltstart: $($bad -join ', ') - WIPP (ab 1.11.4) erneut laufen lassen." } }
     return [pscustomobject]@{ Level = 'Ok'; Text = "$txt." }
 }
 
@@ -2053,7 +2063,7 @@ function Get-FastCgiWarmCheck {
 function Get-OpcacheWarnings {
     param([Parameter(Mandatory)][hashtable]$Values)
     $w = @()
-    if ([string]$Values['loaded'] -ne '1') { return @('OPcache ist nicht geladen (zend_extension=opcache in der php.ini) - jede Seite wird neu uebersetzt. WIPP setzt das.') }
+    if ([string]$Values['loaded'] -ne '1') { return @('OPcache ist nicht geladen (zend_extension=opcache in der php.ini) - jede Seite wird neu uebersetzt - WIPP (ab 1.11.4) erneut laufen lassen.') }
     foreach ($k in $script:OpcacheWant.Keys) {
         $want = [string]$script:OpcacheWant[$k]
         $have = [string]$Values[$k]
@@ -2070,7 +2080,7 @@ function Get-OpcacheWarnings {
     }
     if ([string]$Values['opcache.file_cache']) { $w += "opcache.file_cache ist gesetzt ($($Values['opcache.file_cache'])) - bitte leer lassen (kein Plattencache nach Abstuerzen)" }
     if ($w.Count -eq 0) { return @() }
-    return @('php.ini (OPcache): ' + ($w -join '; ') + ' - setzt WIPP global.')
+    return @('php.ini (OPcache): ' + ($w -join '; ') + ' - weicht ab, WIPP (ab 1.11.4) erneut laufen lassen (Option OPcache).')
 }
 
 function Get-PhpOpcacheValues {
@@ -4197,8 +4207,8 @@ function Test-Installation {
             $pw = Get-AppPoolWarmCheck -Text ((Invoke-AppCmd @('list', 'apppool', $plan.Ordner, '/config:*')).Lines -join "`n") -Want (Get-RecycleTime -Ordner $plan.Ordner)
             if ($pw) { & $add $pw.Level 'Kaltstart' $pw.Text }
         } catch { }
-        if (-not (Test-AppInitInstalled)) { & $add 'Warn' 'Kaltstart' 'IIS-Feature Application Initialization fehlt - die erste Seite nach einem Neustart bleibt langsam (WIPP installiert es: IIS-ApplicationInit).' }
-        else { & $add 'Ok' 'Kaltstart' ("Application Initialization vorhanden - Aufwaermen ueber {0} nach jedem Start des App-Pools." -f $script:WarmupPath) }
+        if (-not (Test-AppInitInstalled)) { & $add 'Warn' 'Kaltstart' 'IIS-Feature Application Initialization fehlt - die erste Seite nach einem Neustart bleibt langsam (Feature IIS-ApplicationInit) - WIPP (ab 1.11.4) erneut laufen lassen.' }
+        else { & $add 'Ok' 'Kaltstart' ("Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber {0} (Vorlage ab 1.64, sonst {1})." -f $script:WarmupPath, $script:WarmupFallback) }
     }
     if ($php) {
         try {

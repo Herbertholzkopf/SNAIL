@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern', '$script:TaskWaitSeconds', '$script:WarmupPath', '$script:FastCgiWant', '$script:OpcacheWant')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern', '$script:TaskWaitSeconds', '$script:WarmupPath', '$script:WarmupFallback', '$script:FastCgiWant', '$script:OpcacheWant')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -1180,11 +1180,14 @@ Test-Case 'Kaltstart: FastCGI idleTimeout/instanceMaxRequests/PHP_FCGI_MAX_REQUE
     Assert-Equal '10000' $apps[1].Env['PHP_FCGI_MAX_REQUESTS'] 'Umgebungsvariable gelesen'
     $w = Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'C:\Program Files\PHP\php.exe'
     Assert-Equal 'Warn' $w.Level $w.Text
-    Assert ($w.Text -match 'idleTimeout 300 s' -and $w.Text -match 'idleTimeout >= 3600' -and $w.Text -notmatch 'instanceMaxRequests >=') $w.Text
+    Assert ($w.Text -match 'idleTimeout 300 s' -and $w.Text -match 'idleTimeout >= 3600' -and $w.Text -notmatch 'instanceMaxRequests =' -and $w.Text -match 'WIPP \(ab 1\.11\.4\) erneut') $w.Text
     $good = $fastCgiOut -replace 'instanceMaxRequests="10000"', 'instanceMaxRequests="10000" idleTimeout="3600"'
     Assert-Equal 'Ok' (Get-FastCgiWarmCheck -FastCgiText $good -PhpExe 'C:\Program Files\PHP\php.exe').Level
     $mismatch = $good -replace 'value="10000"', 'value="500"'
-    Assert ((Get-FastCgiWarmCheck -FastCgiText $mismatch -PhpExe 'C:\Program Files\PHP\php.exe').Text -match 'PHP_FCGI_MAX_REQUESTS = instanceMaxRequests') 'Abweichung erkannt'
+    Assert ((Get-FastCgiWarmCheck -FastCgiText $mismatch -PhpExe 'C:\Program Files\PHP\php.exe').Text -match 'PHP_FCGI_MAX_REQUESTS = 10000') 'Abweichung erkannt'
+    Assert-Equal 'Ok' (Get-FastCgiWarmCheck -FastCgiText ($good -replace 'idleTimeout="3600"', 'idleTimeout="7200"') -PhpExe 'C:\Program Files\PHP\php.exe').Level 'idleTimeout hoeher bleibt ok (>=)'
+    $more = ($good -replace 'instanceMaxRequests="10000"', 'instanceMaxRequests="20000"') -replace 'value="10000"', 'value="20000"'
+    Assert-Equal 'Warn' (Get-FastCgiWarmCheck -FastCgiText $more -PhpExe 'C:\Program Files\PHP\php.exe').Level 'instanceMaxRequests und PHP_FCGI_MAX_REQUESTS genau 10000 (wie WIPP)'
     $d = Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'D:\PHP84\php.exe'
     Assert ($d.Text -match 'instanceMaxRequests 200' -and $d.Text -match 'nicht gesetzt') "IIS-Standard: $($d.Text)"
     Assert ($null -eq (Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'E:\x\php.exe')) 'keine Anwendung'
@@ -1230,6 +1233,13 @@ Test-Case 'Kaltstart: Recycling-Zeitpunkt je Programm stabil 03:MM, Zeitplan und
     Assert ($ia[0] -contains '/doAppInitAfterRestart:true' -and $ia[0] -contains '/commit:apphost') 'in der applicationHost.config'
     Assert-Equal "/-[initializationPage='/alt']" $ia[1][4]; Assert-Equal "/+[initializationPage='/login']" $ia[2][4]
     Assert-Equal 1 @(Get-AppInitEditArgs -Site 'werner' -Current @('/login') -Want '/login').Count 'schon richtig: nur doAppInitAfterRestart'
+    $wp = Join-Path $tmp 'warm'; New-Item -ItemType Directory -Path (Join-Path $wp 'config') -Force | Out-Null
+    Assert-Equal '/login' (Get-WarmupPath -ProgDir $wp) 'ohne routes.php: Rueckfall'
+    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/login', 'x', Router::PUBLIC);")
+    Assert-Equal '/login' (Get-WarmupPath -ProgDir $wp) 'Vorlage vor 1.64'
+    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/aufwaermen', [WarmUpController::class, 'show'], Router::NO_SESSION);")
+    Assert-Equal '/aufwaermen' (Get-WarmupPath -ProgDir $wp) 'Vorlage ab 1.64'
+    Assert-Equal '/login' (Get-WarmupPath -ProgDir '') 'kein Programmordner'
 }
 Test-Case 'Kaltstart: OPcache/realpath_cache bewerten, opcache.file_cache muss leer sein' {
     $good = @{ loaded = '1'; 'opcache.enable' = '1'; 'opcache.memory_consumption' = '256'; 'opcache.max_accelerated_files' = '20000'; 'opcache.validate_timestamps' = '1'; 'opcache.revalidate_freq' = '60'; realpath_cache_size = '4096K'; realpath_cache_ttl = '600'; 'opcache.file_cache' = '' }
