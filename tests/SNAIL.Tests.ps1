@@ -46,7 +46,7 @@ if ($err.Count -gt 0) { throw "Parserfehler: $($err[0].Message)" }
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
 }
-foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern', '$script:TaskWaitSeconds')) {
+foreach ($v in @('$script:KnownNeeds', '$script:OptionalConfigKeys', '$script:PhpConfigHelpers', '$script:ConfigAutoKeys', '$script:PhpConfigState', '$script:PhpConfigVerify', '$script:ConfigV4Keys', '$script:DbIcuLocale', '$script:SecretMask', '$script:TileIcons', '$script:AudioMaxMbDefault', '$script:MemoryMinMbDefault', '$script:FastCgiMinTimeout', '$script:ProgramTokenPattern', '$script:TaskWaitSeconds', '$script:WarmupPath', '$script:FastCgiWant', '$script:OpcacheWant')) {
     $a = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $v }, $true)
     . ([scriptblock]::Create($a.Extent.Text))
 }
@@ -1104,6 +1104,8 @@ Test-Case 'Windows-Aufgaben (7.11): Auswahl nach Ordner, Warten mit Zeitlimit, S
     $steps = @(Get-StepPlan -Plan (& $mk 'update'))
     Assert (-not [bool]($steps | Where-Object { $_['Key'] -eq 'resume' } | Select-Object -First 1)['Fatal']) 'resume nicht fatal'
     Assert ([bool]($steps | Where-Object { $_['Key'] -eq 'pause' } | Select-Object -First 1)['Fatal']) 'pause fatal (Abbruch vor jeder Aenderung)'
+    foreach ($m in @('install', 'update', 'repeat')) { Assert ((& $keys (& $mk $m)) -match 'iis,warmup,') "$m`: warmup direkt nach iis" }
+    Assert (-not [bool]($steps | Where-Object { $_['Key'] -eq 'warmup' } | Select-Object -First 1)['Fatal']) 'warmup nicht fatal'
 }
 Test-Case 'Skript: Aufgaben auch nach Fehler wieder aktiv, App-Pool beim Aktualisieren bis nach migrate aus' {
     $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true)
@@ -1171,6 +1173,81 @@ Test-Case 'FastCGI-Hinweis auf Pruefen: unter 960 s Warnung, sonst OK, fehlt -> 
     Assert-Equal 'Info' (Get-FastCgiTimeoutCheck -FastCgiText $fastCgiOut -PhpExe 'E:\x\php.exe').Level 'keine Anwendung'
     foreach ($x in @($w.Text, $ok.Text)) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
     Assert (-not (Get-Command Set-FastCgiTimeouts -ErrorAction SilentlyContinue)) 'kein Schritt, der FastCGI setzt'
+}
+Test-Case 'Kaltstart: FastCGI idleTimeout/instanceMaxRequests/PHP_FCGI_MAX_REQUESTS nur pruefen (WIPP setzt global)' {
+    $apps = @(Get-FastCgiApps $fastCgiOut)
+    Assert-Equal 3 $apps.Count 'drei Anwendungen'
+    Assert-Equal '10000' $apps[1].Env['PHP_FCGI_MAX_REQUESTS'] 'Umgebungsvariable gelesen'
+    $w = Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'C:\Program Files\PHP\php.exe'
+    Assert-Equal 'Warn' $w.Level $w.Text
+    Assert ($w.Text -match 'idleTimeout 300 s' -and $w.Text -match 'idleTimeout >= 3600' -and $w.Text -notmatch 'instanceMaxRequests >=') $w.Text
+    $good = $fastCgiOut -replace 'instanceMaxRequests="10000"', 'instanceMaxRequests="10000" idleTimeout="3600"'
+    Assert-Equal 'Ok' (Get-FastCgiWarmCheck -FastCgiText $good -PhpExe 'C:\Program Files\PHP\php.exe').Level
+    $mismatch = $good -replace 'value="10000"', 'value="500"'
+    Assert ((Get-FastCgiWarmCheck -FastCgiText $mismatch -PhpExe 'C:\Program Files\PHP\php.exe').Text -match 'PHP_FCGI_MAX_REQUESTS = instanceMaxRequests') 'Abweichung erkannt'
+    $d = Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'D:\PHP84\php.exe'
+    Assert ($d.Text -match 'instanceMaxRequests 200' -and $d.Text -match 'nicht gesetzt') "IIS-Standard: $($d.Text)"
+    Assert ($null -eq (Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'E:\x\php.exe')) 'keine Anwendung'
+    foreach ($x in @($w.Text, $d.Text)) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
+}
+Test-Case 'Kaltstart: Recycling-Zeitpunkt je Programm stabil 03:MM, Zeitplan und Aufwaerm-URL idempotent' {
+    $a = Get-RecycleTime -Ordner 'werner'
+    Assert ($a -match '^03:[0-5]\d:00$') $a
+    Assert-Equal $a (Get-RecycleTime -Ordner 'WERNER') 'Gross/klein egal'
+    Assert-Equal $a (Get-RecycleTime -Ordner 'werner') 'stabil'
+    $mins = @('werner', 'dms', 'archiv', 'zeiten', 'akten') | ForEach-Object { Get-RecycleTime -Ordner $_ } | Select-Object -Unique
+    Assert ($mins.Count -ge 4) "versetzt: $($mins -join ',')"
+    $pool = @'
+<add name="werner" managedRuntimeVersion="" startMode="OnDemand">
+  <processModel identityType="ApplicationPoolIdentity" idleTimeout="00:20:00" />
+  <recycling>
+    <periodicRestart time="1.05:00:00">
+      <schedule>
+        <add value="02:00:00" />
+        <add value="VALUE" />
+      </schedule>
+    </periodicRestart>
+  </recycling>
+</add>
+'@.Replace('VALUE', $a)
+    Assert-Equal ("02:00:00,$a") ((Get-AppPoolScheduleValues $pool) -join ',')
+    $ed = @(Get-ScheduleEditArgs -Pool 'werner' -Current @('02:00:00', $a) -Want $a)
+    Assert-Equal 1 $ed.Count 'nur den fremden Zeitpunkt entfernen'
+    Assert-Equal "/-recycling.periodicRestart.schedule.[value='02:00:00']" $ed[0][3]
+    Assert-Equal 0 @(Get-ScheduleEditArgs -Pool 'werner' -Current @($a) -Want $a).Count 'schon richtig: nichts tun'
+    $ed = @(Get-ScheduleEditArgs -Pool 'werner' -Current @() -Want $a)
+    Assert-Equal "/+recycling.periodicRestart.schedule.[value='$a']" $ed[0][3] 'leer: hinzufuegen'
+    Assert-Equal 0 @(Get-AppPoolScheduleValues '<add name="x"><recycling><periodicRestart time="00:00:00"><schedule /></periodicRestart></recycling></add>').Count 'leerer Zeitplan'
+    $c = Get-AppPoolWarmCheck -Text $pool -Want $a
+    Assert ($c.Level -eq 'Warn' -and $c.Text -match 'startMode OnDemand' -and $c.Text -match '00:20:00' -and $c.Text -match '1.05:00:00' -and $c.Text -match '02:00:00') $c.Text
+    $fixed = $pool.Replace('OnDemand', 'AlwaysRunning').Replace('idleTimeout="00:20:00"', 'idleTimeout="00:00:00"').Replace('time="1.05:00:00"', 'time="00:00:00"').Replace("<add value=""02:00:00"" />", '')
+    Assert-Equal 'Ok' (Get-AppPoolWarmCheck -Text $fixed -Want $a).Level (Get-AppPoolWarmCheck -Text $fixed -Want $a).Text
+    Assert ($null -eq (Get-AppPoolWarmCheck -Text 'ERROR ( message:Cannot find APPPOOL object with identifier "x". )' -Want $a)) 'Pool fehlt noch'
+    $init = '<system.webServer><applicationInitialization doAppInitAfterRestart="true"><add initializationPage="/alt" /></applicationInitialization></system.webServer>'
+    Assert-Equal '/alt' ((Get-AppInitPages $init) -join ',')
+    $ia = @(Get-AppInitEditArgs -Site 'werner' -Current @(Get-AppInitPages $init) -Want '/login')
+    Assert-Equal 3 $ia.Count 'doAppInitAfterRestart, alt weg, neu dazu'
+    Assert ($ia[0] -contains '/doAppInitAfterRestart:true' -and $ia[0] -contains '/commit:apphost') 'in der applicationHost.config'
+    Assert-Equal "/-[initializationPage='/alt']" $ia[1][4]; Assert-Equal "/+[initializationPage='/login']" $ia[2][4]
+    Assert-Equal 1 @(Get-AppInitEditArgs -Site 'werner' -Current @('/login') -Want '/login').Count 'schon richtig: nur doAppInitAfterRestart'
+}
+Test-Case 'Kaltstart: OPcache/realpath_cache bewerten, opcache.file_cache muss leer sein' {
+    $good = @{ loaded = '1'; 'opcache.enable' = '1'; 'opcache.memory_consumption' = '256'; 'opcache.max_accelerated_files' = '20000'; 'opcache.validate_timestamps' = '1'; 'opcache.revalidate_freq' = '60'; realpath_cache_size = '4096K'; realpath_cache_ttl = '600'; 'opcache.file_cache' = '' }
+    Assert-Equal 0 @(Get-OpcacheWarnings -Values $good).Count 'alles wie gewuenscht'
+    $more = $good.Clone(); $more['opcache.memory_consumption'] = '512'; $more['realpath_cache_size'] = '8M'
+    Assert-Equal 0 @(Get-OpcacheWarnings -Values $more).Count 'mehr ist auch gut'
+    $bad = $good.Clone(); $bad['opcache.enable'] = ''; $bad['opcache.memory_consumption'] = '128'; $bad['realpath_cache_size'] = '16K'; $bad['realpath_cache_ttl'] = '120'; $bad['opcache.file_cache'] = 'C:\tmp\oc'; $bad['opcache.revalidate_freq'] = '2'
+    $w = @(Get-OpcacheWarnings -Values $bad)
+    Assert-Equal 1 $w.Count 'eine Zeile'
+    foreach ($x in @('opcache.enable 0', 'memory_consumption 128', 'realpath_cache_size 16K', 'realpath_cache_ttl 120', 'file_cache ist gesetzt', 'revalidate_freq 2')) { Assert ($w[0].Contains($x)) "$x in: $($w[0])" }
+    Assert ($w[0] -notmatch 'max_accelerated_files') 'nur Abweichungen'
+    $off = $good.Clone(); $off['loaded'] = '0'
+    Assert (@(Get-OpcacheWarnings -Values $off)[0] -match 'nicht geladen') 'OPcache fehlt'
+    foreach ($x in @($w[0])) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
+    Assert (-not (Get-Command Set-PhpOpcache -ErrorAction SilentlyContinue)) 'SNAIL schreibt die php.ini nicht'
+    $live = Get-PhpOpcacheValues -PhpExe $PhpExe
+    Assert ($live -and $live.ContainsKey('loaded') -and $live.ContainsKey('opcache.file_cache') -and $live.ContainsKey('realpath_cache_size')) 'Werte ueber php.exe gelesen'
+    Assert (@(Get-OpcacheWarnings -Values $live).Count -le 1) 'hoechstens eine Zeile'
 }
 Test-Case 'Upload-Grenze mit Mindestwert des Katalogs (werner 48 MB), Bedarf fuer php.ini' {
     Assert-Equal ([long](26 * 1048576)) (Get-UploadLimitBytes -MaxMb 25) 'ohne Mindestwert und Audio wie bisher'

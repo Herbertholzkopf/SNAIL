@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.11
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.11'
+$script:AppVersion = '7.12'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -1893,6 +1893,197 @@ function Get-ExampleAudioMaxMb {
         } catch { }
     }
     return $script:AudioMaxMbDefault
+}
+
+<#
+ Kaltstart vermeiden (SNAIL 7.12): nach 20 min Leerlauf beendete IIS bisher den
+ Worker (App-Pool idleTimeout), die erste Seite brauchte dann ~5 s. Je Programm:
+   - App-Pool: idleTimeout 0, startMode AlwaysRunning, kein periodisches
+     Recycling nach Laufzeit, dafuer genau ein fester Zeitpunkt nachts
+     (03:MM, MM aus dem Ordnernamen - je Programm versetzt, stabil)
+   - Website: preloadEnabled, Application Initialization mit Aufwaerm-URL
+     (applicationHost.config per appcmd, nicht public\web.config)
+ Global (FastCGI idleTimeout/instanceMaxRequests, OPcache in der php.ini,
+ IIS-Feature Application Initialization) setzt WIPP; SNAIL prueft nur.
+#>
+$script:WarmupPath = '/login'
+$script:FastCgiWant = @{ IdleTimeout = 3600; InstanceMaxRequests = 10000 }
+$script:OpcacheWant = [ordered]@{
+    'opcache.enable' = 1; 'opcache.memory_consumption' = 256; 'opcache.max_accelerated_files' = 20000
+    'opcache.validate_timestamps' = 1; 'opcache.revalidate_freq' = 60; 'realpath_cache_size' = '4096K'; 'realpath_cache_ttl' = 600
+}
+
+# Fester Recycling-Zeitpunkt je Programm: 03:MM:00, MM = Summe der Zeichen des Ordnernamens mod 60
+function Get-RecycleTime {
+    param([Parameter(Mandatory)][string]$Ordner)
+    $sum = 0
+    foreach ($c in $Ordner.ToLowerInvariant().ToCharArray()) { $sum += [int]$c }
+    return ('03:{0:D2}:00' -f ($sum % 60))
+}
+
+# Eintraege recycling.periodicRestart.schedule aus "appcmd list apppool <name> /config:*"
+function Get-AppPoolScheduleValues {
+    param([string]$Text)
+    $m = [regex]::Match([string]$Text, '<schedule>(.*?)</schedule>', 'Singleline')
+    if (-not $m.Success) { return @() }
+    return @([regex]::Matches($m.Groups[1].Value, '<add\s+value="([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+}
+
+# appcmd-Argumente, damit genau der gewuenschte Zeitpunkt im Zeitplan steht
+function Get-ScheduleEditArgs {
+    param([Parameter(Mandatory)][string]$Pool, $Current = @(), [Parameter(Mandatory)][string]$Want)
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($v in @($Current)) {
+        if ($v -ne $Want) { $list.Add(@('set', 'apppool', "/apppool.name:$Pool", "/-recycling.periodicRestart.schedule.[value='$v']")) }
+    }
+    if (@($Current) -notcontains $Want) { $list.Add(@('set', 'apppool', "/apppool.name:$Pool", "/+recycling.periodicRestart.schedule.[value='$Want']")) }
+    return $list.ToArray()
+}
+
+# Hinweis fuer "Pruefen": stehen die Kaltstart-Werte am App-Pool? ($null = Pool gibt es noch nicht)
+function Get-AppPoolWarmCheck {
+    param([string]$Text, [Parameter(Mandatory)][string]$Want)
+    $head = [regex]::Match([string]$Text, '<add\s+name="[^"]*"([^>]*)>')
+    if (-not $head.Success) { return $null }
+    $start = [regex]::Match($head.Groups[1].Value, 'startMode="([^"]*)"')
+    $start = if ($start.Success) { $start.Groups[1].Value } else { 'OnDemand' }
+    $idle = [regex]::Match([string]$Text, '<processModel\b[^>]*\bidleTimeout="([^"]*)"')
+    $idle = if ($idle.Success) { $idle.Groups[1].Value } else { '00:20:00' }
+    $time = [regex]::Match([string]$Text, '<periodicRestart\b[^>]*\btime="([^"]*)"')
+    $time = if ($time.Success) { $time.Groups[1].Value } else { '1.05:00:00' }
+    $sched = @(Get-AppPoolScheduleValues $Text)
+    $bad = @()
+    if ($start -ne 'AlwaysRunning') { $bad += "startMode $start" }
+    if ($idle -ne '00:00:00') { $bad += "Leerlauf-Ende nach $idle" }
+    if ($time -ne '00:00:00') { $bad += "Recycling nach Laufzeit $time" }
+    if ($sched.Count -ne 1 -or $sched[0] -ne $Want) { $bad += "Recycling-Zeitplan $(if ($sched.Count) { $sched -join ', ' } else { '(leer)' })" }
+    if ($bad.Count -gt 0) { return [pscustomobject]@{ Level = 'Warn'; Text = "App-Pool: $($bad -join ', ') - Einrichten/Aktualisieren setzt AlwaysRunning, kein Leerlauf-Ende, Recycling taeglich um $($Want.Substring(0, 5))." } }
+    return [pscustomobject]@{ Level = 'Ok'; Text = "App-Pool immer an, kein Leerlauf-Ende, Recycling taeglich um $($Want.Substring(0, 5))." }
+}
+
+# initializationPage-Eintraege aus "appcmd list config <site> -section:system.webServer/applicationInitialization"
+function Get-AppInitPages {
+    param([string]$Text)
+    return @([regex]::Matches([string]$Text, 'initializationPage="([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+}
+
+function Get-AppInitEditArgs {
+    param([Parameter(Mandatory)][string]$Site, $Current = @(), [Parameter(Mandatory)][string]$Want)
+    $sec = '-section:system.webServer/applicationInitialization'
+    $list = New-Object System.Collections.Generic.List[object]
+    $list.Add(@('set', 'config', $Site, $sec, '/doAppInitAfterRestart:true', '/commit:apphost'))
+    foreach ($v in @($Current)) {
+        if ($v -ne $Want) { $list.Add(@('set', 'config', $Site, $sec, "/-[initializationPage='$v']", '/commit:apphost')) }
+    }
+    if (@($Current) -notcontains $Want) { $list.Add(@('set', 'config', $Site, $sec, "/+[initializationPage='$Want']", '/commit:apphost')) }
+    return $list.ToArray()
+}
+
+# IIS-Feature Application Initialization vorhanden? (Modul warmup.dll)
+function Test-AppInitInstalled {
+    return (Test-Path -LiteralPath (Join-Path $env:windir 'System32\inetsrv\warmup.dll'))
+}
+
+# Schritt "Kaltstart vermeiden" (nicht fatal); liefert Hinweise fuer "Fertig"
+function Set-ProjectWarmup {
+    param([Parameter(Mandatory)]$Plan)
+    $name = $Plan.Ordner
+    $hints = New-Object System.Collections.Generic.List[string]
+    $want = Get-RecycleTime -Ordner $name
+    $r = Invoke-AppCmd @('set', 'apppool', "/apppool.name:$name", '/processModel.idleTimeout:00:00:00', '/startMode:AlwaysRunning', '/recycling.periodicRestart.time:00:00:00')
+    if ($r.ExitCode -ne 0) { throw "App-Pool (Leerlauf/Start) konnte nicht eingestellt werden: $($r.Output)" }
+    $cur = Get-AppPoolScheduleValues ((Invoke-AppCmd @('list', 'apppool', $name, '/config:*')).Lines -join "`n")
+    foreach ($a in @(Get-ScheduleEditArgs -Pool $name -Current $cur -Want $want)) {
+        $r = Invoke-AppCmd $a
+        if ($r.ExitCode -ne 0) { throw "Recycling-Zeitplan konnte nicht gesetzt werden: $($r.Output)" }
+    }
+    Write-Log ("App-Pool '{0}': kein Beenden im Leerlauf, startMode AlwaysRunning, Recycling nur noch taeglich um {1}." -f $name, $want.Substring(0, 5)) 'Ok'
+    $r = Invoke-AppCmd @('set', 'site', "/site.name:$name", '/applicationDefaults.preloadEnabled:true')
+    if ($r.ExitCode -ne 0) { throw "preloadEnabled der Website konnte nicht gesetzt werden: $($r.Output)" }
+    $r = Invoke-AppCmd @('set', 'app', "$name/", '/preloadEnabled:true')
+    if ($r.ExitCode -ne 0) { throw "preloadEnabled der Anwendung konnte nicht gesetzt werden: $($r.Output)" }
+    if (-not (Test-AppInitInstalled)) {
+        $hints.Add('IIS-Feature Application Initialization fehlt (warmup.dll) - preloadEnabled bleibt ohne Wirkung, die erste Seite nach einem Neustart ist langsam. WIPP installiert es (Feature IIS-ApplicationInit).')
+    } else {
+        $sec = '-section:system.webServer/applicationInitialization'
+        $pages = Get-AppInitPages ((Invoke-AppCmd @('list', 'config', $name, $sec)).Lines -join "`n")
+        foreach ($a in @(Get-AppInitEditArgs -Site $name -Current $pages -Want $script:WarmupPath)) {
+            $r = Invoke-AppCmd $a
+            if ($r.ExitCode -ne 0) { throw "Application Initialization konnte nicht eingestellt werden: $($r.Output)" }
+        }
+        Write-Log ("Website '{0}': preloadEnabled, Aufwaermen ueber {1} nach jedem Start." -f $name, $script:WarmupPath) 'Ok'
+    }
+    return $hints.ToArray()
+}
+
+# FastCGI-Anwendungen mit Attributen und Umgebungsvariablen (appcmd list config -section:system.webServer/fastCgi)
+function Get-FastCgiApps {
+    param([string]$Text)
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($m in [regex]::Matches([string]$Text, '<application\s+([^>]*?)(/>|>(.*?)</application>)', 'Singleline')) {
+        $h = @{}
+        foreach ($a in [regex]::Matches($m.Groups[1].Value, '([A-Za-z]+)="([^"]*)"')) { $h[$a.Groups[1].Value] = $a.Groups[2].Value }
+        $vars = @{}
+        foreach ($e in [regex]::Matches([string]$m.Groups[3].Value, '<add\s+name="([^"]+)"\s+value="([^"]*)"')) { $vars[$e.Groups[1].Value] = $e.Groups[2].Value }
+        $list.Add([pscustomobject]@{ Attr = $h; Env = $vars })
+    }
+    return $list.ToArray()
+}
+
+# Hinweis fuer "Pruefen": FastCGI-Werte gegen Kaltstart (IIS-Standard: idleTimeout 300, instanceMaxRequests 200)
+function Get-FastCgiWarmCheck {
+    param([string]$FastCgiText, [Parameter(Mandatory)][string]$PhpExe)
+    $pos = $PhpExe.LastIndexOfAny([char[]]@('\', '/'))
+    $cgi = if ($pos -ge 0) { $PhpExe.Substring(0, $pos + 1) + 'php-cgi.exe' } else { 'php-cgi.exe' }
+    $app = @(Get-FastCgiApps $FastCgiText | Where-Object { $_.Attr['fullPath'] -ieq $cgi -and -not $_.Attr['arguments'] }) | Select-Object -First 1
+    if (-not $app) { return $null }
+    $idle = if ($app.Attr.ContainsKey('idleTimeout')) { [int]$app.Attr['idleTimeout'] } else { 300 }
+    $max = if ($app.Attr.ContainsKey('instanceMaxRequests')) { [int]$app.Attr['instanceMaxRequests'] } else { 200 }
+    $envMax = if ($app.Env.ContainsKey('PHP_FCGI_MAX_REQUESTS')) { [string]$app.Env['PHP_FCGI_MAX_REQUESTS'] } else { '' }
+    $txt = "FastCGI: idleTimeout $idle s, instanceMaxRequests $max, PHP_FCGI_MAX_REQUESTS $(if ($envMax) { $envMax } else { '(nicht gesetzt)' })"
+    $bad = @()
+    if ($idle -lt $script:FastCgiWant.IdleTimeout) { $bad += "idleTimeout >= $($script:FastCgiWant.IdleTimeout)" }
+    if ($max -lt $script:FastCgiWant.InstanceMaxRequests) { $bad += "instanceMaxRequests >= $($script:FastCgiWant.InstanceMaxRequests)" }
+    if ($envMax -ne [string]$max) { $bad += 'PHP_FCGI_MAX_REQUESTS = instanceMaxRequests' }
+    if ($bad.Count -gt 0) { return [pscustomobject]@{ Level = 'Warn'; Text = "$txt - gegen Kaltstart empfohlen: $($bad -join ', ') (setzt WIPP global)." } }
+    return [pscustomobject]@{ Level = 'Ok'; Text = "$txt." }
+}
+
+# OPcache/realpath_cache aus der php.ini (ueber php.exe) bewerten. $Values: Name -> Wert (ini_get), 'loaded' -> 0/1
+function Get-OpcacheWarnings {
+    param([Parameter(Mandatory)][hashtable]$Values)
+    $w = @()
+    if ([string]$Values['loaded'] -ne '1') { return @('OPcache ist nicht geladen (zend_extension=opcache in der php.ini) - jede Seite wird neu uebersetzt. WIPP setzt das.') }
+    foreach ($k in $script:OpcacheWant.Keys) {
+        $want = [string]$script:OpcacheWant[$k]
+        $have = [string]$Values[$k]
+        if ($k -eq 'realpath_cache_size') {
+            if ((ConvertTo-Megabytes $have) -lt (ConvertTo-Megabytes $want)) { $w += "$k $have (empfohlen $want)" }
+        } elseif ($k -eq 'opcache.enable' -or $k -eq 'opcache.validate_timestamps') {
+            if ($have -ne '1') { $w += "$k $(if ($have) { $have } else { '0' }) (empfohlen 1)" }
+        } elseif ($k -eq 'opcache.revalidate_freq') {
+            if ($have -ne $want) { $w += "$k $have (empfohlen $want)" }
+        } else {
+            $n = 0
+            if (-not [int]::TryParse($have, [ref]$n) -or $n -lt [int]$want) { $w += "$k $have (empfohlen >= $want)" }
+        }
+    }
+    if ([string]$Values['opcache.file_cache']) { $w += "opcache.file_cache ist gesetzt ($($Values['opcache.file_cache'])) - bitte leer lassen (kein Plattencache nach Abstuerzen)" }
+    if ($w.Count -eq 0) { return @() }
+    return @('php.ini (OPcache): ' + ($w -join '; ') + ' - setzt WIPP global.')
+}
+
+function Get-PhpOpcacheValues {
+    param([Parameter(Mandatory)][string]$PhpExe)
+    $keys = @($script:OpcacheWant.Keys) + @('opcache.file_cache')
+    $code = '$o = ["loaded" => extension_loaded("Zend OPcache") ? "1" : "0"]; foreach (array_slice($argv, 1) as $k) { $v = ini_get($k); $o[$k] = $v === false ? "" : (string) $v; } echo json_encode($o);'
+    $r = Invoke-ExeCapture -FilePath $PhpExe -ArgumentList (ConvertTo-CmdArgs (@('-r', $code) + $keys)) -Utf8Output -TimeoutSec 60
+    $pos = $r.Output.IndexOf('{')
+    if ($r.ExitCode -ne 0 -or $pos -lt 0) { return $null }
+    $j = $r.Output.Substring($pos) | ConvertFrom-Json
+    $h = @{}
+    foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = [string]$p.Value }
+    return $h
 }
 
 # Gueltiger Wert von maxAllowedContentLength fuer eine Website (Bytes, -1 = unbekannt)
@@ -3996,8 +4187,27 @@ function Test-Installation {
     if ($reqMin -gt 0) { & $add 'Info' 'Upload-Grenze' ("Mindestwert des Katalogs fuer {0}: {1} MB (KI-Routen)" -f $inst.Service.Name, $reqMin) }
     if ($php -and (Test-Path -LiteralPath $script:AppCmd)) {
         try {
-            $fc = Get-FastCgiTimeoutCheck -FastCgiText ((Invoke-AppCmd @('list', 'config', '-section:system.webServer/fastCgi')).Lines -join "`n") -PhpExe $php
+            $fcText = ((Invoke-AppCmd @('list', 'config', '-section:system.webServer/fastCgi')).Lines -join "`n")
+            $fc = Get-FastCgiTimeoutCheck -FastCgiText $fcText -PhpExe $php
             & $add $fc.Level 'FastCGI' $fc.Text
+            $fw = Get-FastCgiWarmCheck -FastCgiText $fcText -PhpExe $php
+            if ($fw) { & $add $fw.Level 'Kaltstart' $fw.Text }
+        } catch { }
+        try {
+            $pw = Get-AppPoolWarmCheck -Text ((Invoke-AppCmd @('list', 'apppool', $plan.Ordner, '/config:*')).Lines -join "`n") -Want (Get-RecycleTime -Ordner $plan.Ordner)
+            if ($pw) { & $add $pw.Level 'Kaltstart' $pw.Text }
+        } catch { }
+        if (-not (Test-AppInitInstalled)) { & $add 'Warn' 'Kaltstart' 'IIS-Feature Application Initialization fehlt - die erste Seite nach einem Neustart bleibt langsam (WIPP installiert es: IIS-ApplicationInit).' }
+        else { & $add 'Ok' 'Kaltstart' ("Application Initialization vorhanden - Aufwaermen ueber {0} nach jedem Start des App-Pools." -f $script:WarmupPath) }
+    }
+    if ($php) {
+        try {
+            $oc = Get-PhpOpcacheValues -PhpExe $php
+            if ($oc) {
+                $ow = @(Get-OpcacheWarnings -Values $oc)
+                if ($ow.Count -gt 0) { foreach ($w in $ow) { & $add 'Warn' 'OPcache' $w } }
+                else { & $add 'Ok' 'OPcache' ("an, {0} MB, {1} Dateien, ohne file_cache." -f $oc['opcache.memory_consumption'], $oc['opcache.max_accelerated_files']) }
+            }
         } catch { }
     }
     if ($null -ne $audioMb) {
@@ -4185,6 +4395,7 @@ function Get-StepPlan {
     $s.Add(@{ Key = 'code';     Title = $codeTitle; Fatal = $true })
     $s.Add(@{ Key = 'folders';  Title = 'Datenordner Data, Cache, Logs, Temp'; Fatal = $true })
     $s.Add(@{ Key = 'iis';      Title = 'IIS: App-Pool, Website, Upload-Grenze'; Fatal = $true })
+    $s.Add(@{ Key = 'warmup';   Title = 'IIS: Kaltstart vermeiden (immer an, Aufwaermen, Recycling nachts)'; Fatal = $false })
     $s.Add(@{ Key = 'acl';      Title = 'Rechte: Programm-, Daten-, Gemeinsamer Ordner'; Fatal = $true })
     if ($Plan.Kind -eq 'new' -and $Plan.Inst.Firewall) {
         $s.Add(@{ Key = 'firewall'; Title = 'Firewallregel (im Netzwerk erreichbar)'; Fatal = $true })
@@ -4311,6 +4522,9 @@ function Invoke-Installation {
                     'folders'  { New-DataFolders -Plan $Plan }
                     'iis'      { Set-ProjectSite -Plan $Plan -KeepPoolStopped:$poolStopped }
                     'pause'    { Suspend-ProjectTasks -Ordner $Plan.Ordner | Out-Null }
+                    'warmup' {
+                        foreach ($h in @(Set-ProjectWarmup -Plan $Plan)) { Write-Log $h 'Warn'; $rows.Add(@{ Level = 'Warn'; Name = 'Kaltstart'; Text = $h }); $state = 'Warn' }
+                    }
                     'resume' {
                         Resume-ProjectTasks -Names @($script:SuspendedTasks)
                         if ($poolStopped) { Start-ProjectPool -Name $Plan.Ordner; $poolStopped = $false }
