@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.1
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12'
+$script:AppVersion = '7.12.1'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -1939,14 +1939,66 @@ function Get-AppPoolScheduleValues {
 }
 
 # appcmd-Argumente, damit genau der gewuenschte Zeitpunkt im Zeitplan steht
+<#
+ Zeitplan aus "appcmd list config -section:system.applicationHost/applicationPools"
+ (nur ausdruecklich gesetzte Werte, ohne IIS-Vorgaben): Pool = Eintraege direkt am
+ App-Pool, Defaults = Eintraege unter applicationPoolDefaults (erbt jeder Pool).
+ "/config:*" am Pool zeigt dagegen die wirksame Liste inklusive geerbter
+ Eintraege - die lassen sich am Pool nicht entfernen (7.12: "Angefordertes
+ Auflistungselement kann nicht gefunden werden").
+#>
+function Get-PoolScheduleConfig {
+    param([string]$Text, [Parameter(Mandatory)][string]$Pool)
+    $res = [pscustomobject]@{ Pool = @(); Defaults = @() }
+    $x = $null
+    try { $x = [xml][string]$Text } catch { return $res }
+    $root = $x.SelectSingleNode('//applicationPools')
+    if (-not $root) { return $res }
+    $res.Defaults = @($root.SelectNodes('applicationPoolDefaults/recycling/periodicRestart/schedule/add') | ForEach-Object { $_.GetAttribute('value') })
+    foreach ($a in @($root.SelectNodes('add'))) {
+        if ($a.GetAttribute('name') -ieq $Pool) {
+            $res.Pool = @($a.SelectNodes('recycling/periodicRestart/schedule/add') | ForEach-Object { $_.GetAttribute('value') })
+        }
+    }
+    return $res
+}
+
+# appcmd-Argumente (Abschnitt applicationPools in der applicationHost.config), damit am
+# Pool genau der gewuenschte Zeitpunkt steht; entfernt nur, was am Pool selbst steht
 function Get-ScheduleEditArgs {
     param([Parameter(Mandatory)][string]$Pool, $Current = @(), [Parameter(Mandatory)][string]$Want)
+    $sec = '-section:system.applicationHost/applicationPools'
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($v in @($Current)) {
-        if ($v -ne $Want) { $list.Add(@('set', 'apppool', "/apppool.name:$Pool", "/-recycling.periodicRestart.schedule.[value='$v']")) }
+        if ($v -and $v -ne $Want) { $list.Add(@('set', 'config', $sec, "/-[name='$Pool'].recycling.periodicRestart.schedule.[value='$v']", '/commit:apphost')) }
     }
-    if (@($Current) -notcontains $Want) { $list.Add(@('set', 'apppool', "/apppool.name:$Pool", "/+recycling.periodicRestart.schedule.[value='$Want']")) }
+    if (@($Current) -notcontains $Want) { $list.Add(@('set', 'config', $sec, "/+[name='$Pool'].recycling.periodicRestart.schedule.[value='$Want']", '/commit:apphost')) }
     return $list.ToArray()
+}
+
+# Recycling-Zeitplan setzen; liefert Hinweise statt abzubrechen (der Rest des Schritts laeuft weiter)
+function Set-PoolSchedule {
+    param([Parameter(Mandatory)][string]$Pool, [Parameter(Mandatory)][string]$Want)
+    $hints = New-Object System.Collections.Generic.List[string]
+    $cfg = Get-PoolScheduleConfig -Text ((Invoke-AppCmd @('list', 'config', '-section:system.applicationHost/applicationPools')).Lines -join "`n") -Pool $Pool
+    foreach ($a in @(Get-ScheduleEditArgs -Pool $Pool -Current $cfg.Pool -Want $Want)) {
+        $r = Invoke-AppCmd $a
+        if ($r.ExitCode -ne 0) {
+            if ($a[3] -like '/-*') { Write-Log "Recycling-Zeitpunkt nicht entfernt ($($a[3])): $($r.Output)" 'Warn' }
+            else { $hints.Add("Recycling-Zeitplan von App-Pool '$Pool' konnte nicht gesetzt werden: $($r.Output)") }
+        }
+    }
+    $eff = @(Get-AppPoolScheduleValues ((Invoke-AppCmd @('list', 'apppool', $Pool, '/config:*')).Lines -join "`n"))
+    if ($eff -notcontains $Want) {
+        if ($hints.Count -eq 0) { $hints.Add("Recycling-Zeitplan von App-Pool '$Pool' enthaelt $Want nicht (gelesen: $(if ($eff.Count) { $eff -join ', ' } else { 'leer' })).") }
+    } else {
+        $other = @($eff | Where-Object { $_ -ne $Want })
+        if ($other.Count -gt 0) {
+            $src = if (@($cfg.Defaults | Where-Object { $other -contains $_ }).Count -gt 0) { ' - geerbt aus applicationPoolDefaults (gilt fuer alle Pools, SNAIL aendert es nicht)' } else { '' }
+            $hints.Add("App-Pool '$Pool' recycelt zusaetzlich um $($other -join ', ')$src.")
+        }
+    }
+    return $hints.ToArray()
 }
 
 # Hinweis fuer "Pruefen": stehen die Kaltstart-Werte am App-Pool? ($null = Pool gibt es noch nicht)
@@ -2001,12 +2053,10 @@ function Set-ProjectWarmup {
     $want = Get-RecycleTime -Ordner $name
     $r = Invoke-AppCmd @('set', 'apppool', "/apppool.name:$name", '/processModel.idleTimeout:00:00:00', '/startMode:AlwaysRunning', '/recycling.periodicRestart.time:00:00:00')
     if ($r.ExitCode -ne 0) { throw "App-Pool (Leerlauf/Start) konnte nicht eingestellt werden: $($r.Output)" }
-    $cur = Get-AppPoolScheduleValues ((Invoke-AppCmd @('list', 'apppool', $name, '/config:*')).Lines -join "`n")
-    foreach ($a in @(Get-ScheduleEditArgs -Pool $name -Current $cur -Want $want)) {
-        $r = Invoke-AppCmd $a
-        if ($r.ExitCode -ne 0) { throw "Recycling-Zeitplan konnte nicht gesetzt werden: $($r.Output)" }
-    }
-    Write-Log ("App-Pool '{0}': kein Beenden im Leerlauf, startMode AlwaysRunning, Recycling nur noch taeglich um {1}." -f $name, $want.Substring(0, 5)) 'Ok'
+    $sh = @(Set-PoolSchedule -Pool $name -Want $want)
+    foreach ($h in $sh) { $hints.Add($h) }
+    if ($sh.Count -eq 0) { Write-Log ("App-Pool '{0}': kein Beenden im Leerlauf, startMode AlwaysRunning, Recycling nur noch taeglich um {1}." -f $name, $want.Substring(0, 5)) 'Ok' }
+    else { Write-Log ("App-Pool '{0}': kein Beenden im Leerlauf, startMode AlwaysRunning, kein Recycling nach Laufzeit." -f $name) 'Ok' }
     $r = Invoke-AppCmd @('set', 'site', "/site.name:$name", '/applicationDefaults.preloadEnabled:true')
     if ($r.ExitCode -ne 0) { throw "preloadEnabled der Website konnte nicht gesetzt werden: $($r.Output)" }
     $r = Invoke-AppCmd @('set', 'app', "$name/", '/preloadEnabled:true')
