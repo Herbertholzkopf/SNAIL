@@ -982,6 +982,9 @@ Test-Case 'Get-InstalledInstances: zwei Mandanten, BOM, ohne config.php / bin\co
     Assert-Equal 'muster' $a.Key; Assert-Equal 'Muster GmbH' $a.Name 'Name aus services.json'; Assert-Equal 21100 $a.Port
     Assert-Equal 'projekt' $a.Db.Name 'db aus info'; Assert-Equal 'https://muster.test/' $a.Url
     Assert-Equal 'http://alt/' $a.ServicesUrl
+    $one = @(Get-InstalledInstances -ProgRoot $ak -PhpExe $PhpExe -Catalog $catalog.Services -Sites $sites -ServicesJson $sjf -Only 'projekt')
+    Assert-Equal 'projekt' (($one | ForEach-Object Ordner) -join ',') '-Only: nur dieser Ordner (Erneut pruefen liest frisch)'
+    Assert-Equal 'https://muster.test/' $one[0].Url
     Assert-Equal 'beispiel' $b.Key; Assert-Equal 'beispiel' $b.Name 'nicht in services.json -> Schluessel'; Assert-Equal 21101 $b.Port 'Site-Name ohne Gross/Klein'
     Assert-Equal 'Projektvorlage - Muster GmbH' $a.Display
     Assert-Equal 'olaf' $o.Db.Name 'Fallback ohne db in info'
@@ -1248,8 +1251,15 @@ Test-Case 'Kaltstart: Recycling-Zeitpunkt je Programm stabil 03:MM, Zeitplan und
     Assert-Equal 1 @(Get-AppInitEditArgs -Site 'werner' -Current @('/login') -Want '/login').Count 'schon richtig: nur doAppInitAfterRestart'
     $wp = Join-Path $tmp 'warm'; New-Item -ItemType Directory -Path (Join-Path $wp 'config') -Force | Out-Null
     Assert-Equal '/login' (Get-WarmupPath -ProgDir $wp) 'ohne routes.php: Rueckfall'
-    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/login', 'x', Router::PUBLIC);")
+    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`nreturn [`n    'GET /login' => [AuthController::class, 'showLogin', Router::PUBLIC],`n    'GET /aufwaermen-alt' => [X::class, 'y', Router::PUBLIC],`n];")
     Assert-Equal '/login' (Get-WarmupPath -ProgDir $wp) 'Vorlage vor 1.64'
+    # echtes Format der Vorlage (Befund SRV-Test 18.11.: 7.12.3 fand es nicht)
+    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`nreturn [`n    'GET /aufwaermen' => [ConnectionController::class, 'warmUp', Router::NO_SESSION],`n];")
+    Assert-Equal '/aufwaermen' (Get-WarmupPath -ProgDir $wp) "'GET /aufwaermen' => ..."
+    if (Test-Path -LiteralPath (Join-Path $Vorlage 'config/routes.php')) {
+        $hasRoute = ([System.IO.File]::ReadAllText((Join-Path $Vorlage 'config/routes.php'))).Contains("'GET /aufwaermen'")
+        Assert-Equal $(if ($hasRoute) { '/aufwaermen' } else { '/login' }) (Get-WarmupPath -ProgDir $Vorlage) 'routes.php der Vorlage'
+    }
     [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/aufwaermen', [WarmUpController::class, 'show'], Router::NO_SESSION);")
     Assert-Equal '/aufwaermen' (Get-WarmupPath -ProgDir $wp) 'Vorlage ab 1.64'
     Assert-Equal '/login' (Get-WarmupPath -ProgDir '') 'kein Programmordner'
@@ -1380,6 +1390,14 @@ Test-Case 'Kaltstart 7.12.2: Aufwaerm-Seite nur an der Website aendern, geerbte 
     foreach ($x in $h) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
     $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectWarmup' }, $true)
     Assert ($fn.Extent.Text -match 'Set-SiteAppInit' -and $fn.Extent.Text -notmatch 'Application Initialization konnte nicht eingestellt werden') 'Aufwaerm-Seite bricht den Schritt nicht ab'
+}
+Test-Case 'Pruefen (7.12.4): Knopf je Modus, vorhandene Installation vor dem Pruefen frisch lesen' {
+    Assert-Equal 'Installieren' (Get-RunVerb -Mode 'install')
+    Assert-Equal 'Wiederholen' (Get-RunVerb -Mode 'repeat')
+    Assert-Equal 'Aktualisieren' (Get-RunVerb -Mode 'update')
+    Assert-Equal 'Installieren' (Get-RunVerb -Mode '')
+    $cp = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-CheckPage' }, $true).Extent.Text
+    Assert ($cp.IndexOf('Update-InstalledTarget') -ge 0 -and $cp.IndexOf('Update-InstalledTarget') -lt $cp.IndexOf('Test-Installation')) 'frisch lesen vor Test-Installation'
 }
 Test-Case 'Kaltstart: OPcache/realpath_cache bewerten, opcache.file_cache muss leer sein' {
     $good = @{ loaded = '1'; 'opcache.enable' = '1'; 'opcache.memory_consumption' = '256'; 'opcache.max_accelerated_files' = '20000'; 'opcache.validate_timestamps' = '1'; 'opcache.revalidate_freq' = '60'; realpath_cache_size = '4096K'; realpath_cache_ttl = '600'; 'opcache.file_cache' = '' }

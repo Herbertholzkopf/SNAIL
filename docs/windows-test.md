@@ -352,6 +352,9 @@ Braucht werner und ein Programm im Modus dms (wie in 18), beide mit Vorlage **ab
 | 21.5 | werner mit Vorlage < v1.87, Programm ≥ v1.87, „Einrichtung wiederholen“ | ⚠ „… werner zuerst aktualisieren, dann bei diesem Programm Einrichtung wiederholen.“ (im Protokoll „[FEHLER] dms_zu_alt: …“) |
 | 21.6 | Programm mit Vorlage < v1.87 | ⚠ „… das Programm kennt dms:admins-uebernehmen noch nicht …“; Lauf endet normal |
 | 21.7 | werner beenden (App-Pool stoppen), „Einrichtung wiederholen“ beim Programm | ⚠ „… dms_nicht_erreichbar: Das DMS ist nicht erreichbar …“; danach werner wieder starten |
+| 21.8 | (Befund SRV-Test 18.11.) werner und Auftragsprogramm „Einrichtung wiederholen“; danach `$init` je Website | `/login` ersetzt durch genau ein `initializationPage="/aufwaermen"`; auf „Prüfen“ „… Aufwaermen … ueber /aufwaermen (aus config\routes.php des Programms …)“ |
+| 21.9 | In der `config.php` eines Programms `app.url` ändern, **ohne** „Neu einlesen“ das Programm wählen → „Erneut prüfen“ | Protokoll „app.url von <Ordner> frisch gelesen: '<neu>' …“; Prüfen und Lauf nutzen die neue Adresse (services.json-Zeile) |
+| 21.10 | Knopf auf „Prüfen“ | Neuinstallation „Installieren“, vorhandener Ordner „Wiederholen“, ZIP bei vorhandener Installation „Aktualisieren“ |
 
 ## Ergebnis festhalten
 

@@ -1913,7 +1913,8 @@ $script:WarmupFallback = '/login'
 function Get-WarmupPath {
     param([string]$ProgDir)
     $routes = if ($ProgDir) { Join-Path (Join-Path $ProgDir 'config') 'routes.php' } else { '' }
-    if ($routes -and (Test-Path -LiteralPath $routes -PathType Leaf) -and ([System.IO.File]::ReadAllText($routes) -match "['""]/aufwaermen['""]")) { return $script:WarmupPath }
+    # Vorlage: 'GET /aufwaermen' => [...] (Methode und Pfad in einem Schluessel; 7.12.3 suchte nur '/aufwaermen')
+    if ($routes -and (Test-Path -LiteralPath $routes -PathType Leaf) -and ([System.IO.File]::ReadAllText($routes) -match "['""](?:GET\s+)?/aufwaermen['""]")) { return $script:WarmupPath }
     return $script:WarmupFallback
 }
 $script:FastCgiWant = @{ IdleTimeout = 3600; InstanceMaxRequests = 10000 }
@@ -3912,12 +3913,13 @@ function Get-ServicesEntry {
  Katalog (fehlt er dort, gilt der Name aus services.json bzw. app.name).
 #>
 function Get-InstalledInstances {
-    param([Parameter(Mandatory)][string]$ProgRoot, [string]$PhpExe, $Catalog = @{}, $Sites = @(), [string]$ServicesJson = '', [string]$CredDir = '')
+    param([Parameter(Mandatory)][string]$ProgRoot, [string]$PhpExe, $Catalog = @{}, $Sites = @(), [string]$ServicesJson = '', [string]$CredDir = '', [string]$Only = '')
     $list = New-Object System.Collections.Generic.List[object]
     if (-not (Test-Path -LiteralPath $ProgRoot)) { return @() }
     $tree = $null
     if ($ServicesJson) { try { $tree = Read-ServicesJson -Path $ServicesJson } catch { $tree = $null } }
     foreach ($d in @(Get-ChildItem -LiteralPath $ProgRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        if ($Only -and $d.Name -ne $Only) { continue }
         $console = Join-Path (Join-Path $d.FullName 'bin') 'console'
         if (-not (Test-Path -LiteralPath (Join-Path $d.FullName 'config.php')) -or -not (Test-Path -LiteralPath $console)) { continue }
         $inst = [pscustomobject]@{
@@ -4373,7 +4375,12 @@ function Test-Installation {
             if ($pw) { & $add $pw.Level 'Kaltstart' $pw.Text }
         } catch { }
         if (-not (Test-AppInitInstalled)) { & $add 'Warn' 'Kaltstart' 'IIS-Feature Application Initialization fehlt - die erste Seite nach einem Neustart bleibt langsam (Feature IIS-ApplicationInit) - WIPP (ab 1.11.4) erneut laufen lassen.' }
-        else { & $add 'Ok' 'Kaltstart' ("Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber {0} (Vorlage ab 1.64, sonst {1})." -f $script:WarmupPath, $script:WarmupFallback) }
+        else {
+            $wp = if ($plan.ProgDir -and (Test-Path -LiteralPath (Join-Path (Join-Path $plan.ProgDir 'bin') 'console'))) { Get-WarmupPath -ProgDir $plan.ProgDir } else { '' }
+            $txt = if ($wp) { "Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber $wp (aus config\routes.php des Programms; ein neuer Programmstand kann das beim Aktualisieren aendern)." }
+                   else { "Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber $($script:WarmupPath) (Vorlage ab 1.64, sonst $($script:WarmupFallback))." }
+            & $add 'Ok' 'Kaltstart' $txt
+        }
     }
     if ($php) {
         try {
@@ -5509,7 +5516,32 @@ function Initialize-CheckInputs {
     }
 }
 
+# Vorhandene Installation vor dem Pruefen frisch lesen (info, Binding, services.json) -
+# eine seit "Neu einlesen" geaenderte app.url o. Ae. gilt sonst erst nach dem naechsten Einlesen
+function Update-InstalledTarget {
+    $t = $script:Target
+    if (-not $t -or $t.Kind -ne 'installed') { return }
+    try {
+        $sites = if (Test-Path -LiteralPath $script:AppCmd) { @(Get-IisSites) } else { @() }
+        $x = @(Get-InstalledInstances -ProgRoot $script:Settings.ProgRoot -PhpExe (Find-PhpExe) -Catalog $script:Services `
+            -Sites $sites -ServicesJson (Join-Path $script:Settings.ProgRoot 'services.json') -CredDir $script:CredDir -Only $t.Ordner) | Select-Object -First 1
+        if (-not $x -or $x.Error) { return }
+        if ($x.Url -ne $t.Url) { Write-Log ("app.url von {0} frisch gelesen: '{1}' (vorher '{2}')." -f $x.Ordner, $x.Url, $t.Url) }
+        $script:Instances = @($script:Instances | ForEach-Object { if ($_.Ordner -eq $x.Ordner) { $x } else { $_ } })
+        $script:Target = ConvertTo-InstallTarget -Instance $x
+    } catch {
+        Write-Log ("Installation {0} nicht frisch gelesen: {1}" -f $t.Ordner, $_.Exception.Message) 'Warn'
+    }
+}
+
+# Beschriftung des Ausfuehren-Knopfs je Modus
+function Get-RunVerb {
+    param([string]$Mode)
+    switch ($Mode) { 'update' { return 'Aktualisieren' } 'repeat' { return 'Wiederholen' } default { return 'Installieren' } }
+}
+
 function Invoke-CheckPage {
+    Update-InstalledTarget
     $t = $script:Target
     $script:LblCheckHead.Text = "Prüfen: $($t.Display)"
     $script:LvCheck.BeginUpdate()
@@ -5540,7 +5572,7 @@ function Invoke-CheckPage {
     if ($adopt) { $script:ChkAdoptDb.Text = $res.Plan.DbAdoptText }
     $script:GrpAdopt.Visible = $adopt
     if ($res.Plan) { $script:RbExisting.Text = "Vorhandenen Programmordner nutzen: $($res.Plan.ProgDir)" + $(if ($t.Kind -eq 'installed') { ' (= Einrichtung wiederholen; ZIP = Aktualisieren)' } else { '' }) }
-    $verb = if ($isUpdate) { 'Aktualisieren' } else { 'Installieren' }
+    $verb = Get-RunVerb -Mode $(if ($res.Plan) { $res.Plan.Mode } else { '' })
     $script:LblCheckHint.Text = if ($res.Ok -and $adopt) {
         'Datenbank bzw. Rolle gibt es schon (gelb markiert). "Installieren" erst nach dem Häkchen "übernehmen" - die alten Daten bleiben dann erhalten.'
     } elseif ($res.Ok) {
@@ -5925,7 +5957,7 @@ function Update-NextState {
             $isUpdate = ($script:Plan -and $script:Plan.Mode -eq 'update')
             $backupOk = (-not $isUpdate) -or (-not $script:ChkSkipBackup.Checked) -or $script:ChkBackupOk.Checked
             $adoptOk = (-not ($script:Plan -and $script:Plan.DbAdoptNeeded)) -or $script:ChkAdoptDb.Checked
-            $script:BtnNext.Text    = if ($isUpdate) { 'Aktualisieren' } else { 'Installieren' }
+            $script:BtnNext.Text    = Get-RunVerb -Mode $(if ($script:Plan) { $script:Plan.Mode } else { '' })
             $script:BtnNext.Enabled = [bool]$script:CheckOk -and $backupOk -and $adoptOk -and -not $script:Busy
             $script:BtnBack.Enabled = -not $script:Busy
         }
