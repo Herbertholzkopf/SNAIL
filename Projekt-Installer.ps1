@@ -3090,6 +3090,18 @@ function ConvertTo-Megabytes {
 #>
 # -ExitCodeChecked: einen Exit-Code ungleich 0 wertet der Aufrufer aus (z. B.
 # user:create bei vorhandenem Benutzer) - dann keine Error-Zeile im Protokoll
+# Protokoll-Stufe einer Konsolenzeile: Zeilen mit [OK]/[WARNUNG]/[FEHLER] nach ihrem
+# Praefix (check), sonst nach dem Exit-Code des Befehls
+function Get-ConsoleLineLevel {
+    param([AllowEmptyString()][string]$Line, [int]$ExitCode, [switch]$ExitCodeChecked)
+    if ($Line -match '^\s*\[\s*OK\s*\]') { return 'Ok' }
+    if ($Line -match '^\s*\[\s*WARNUNG\s*\]') { return 'Warn' }
+    if ($Line -match '^\s*\[\s*FEHLER\s*\]') { return 'Error' }
+    if ($Line -match '^\s*\[\s*INFO\s*\]') { return 'Info' }
+    if ($ExitCode -eq 0 -or $ExitCodeChecked) { return 'Info' }
+    return 'Warn'
+}
+
 function Invoke-Console {
     param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSec = 600, [switch]$ExitCodeChecked)
     $console = Join-Path (Join-Path $Plan.ProgDir 'bin') 'console'
@@ -3098,7 +3110,7 @@ function Invoke-Console {
     $r = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs (@($console) + $Arguments)) -WorkingDirectory $Plan.ProgDir -Utf8Output -TimeoutSec $TimeoutSec
     foreach ($l in $r.Lines) {
         $shown = if ($l -match 'Passwort:\s*\S') { ($l -replace '(Passwort:\s*).*$', '$1********') } else { $l }
-        Write-Log ('  ' + $shown) $(if ($r.ExitCode -eq 0 -or $ExitCodeChecked) { 'Info' } else { 'Warn' })
+        Write-Log ('  ' + $shown) (Get-ConsoleLineLevel -Line $l -ExitCode $r.ExitCode -ExitCodeChecked:$ExitCodeChecked)
     }
     Write-Log ("Exit-Code {0}" -f $r.ExitCode) $(if ($r.ExitCode -eq 0) { 'Ok' } elseif ($ExitCodeChecked) { 'Info' } else { 'Error' })
     return $r

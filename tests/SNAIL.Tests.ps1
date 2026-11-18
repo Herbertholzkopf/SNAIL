@@ -1406,6 +1406,15 @@ Test-Case 'check des DMS (7.12.4): Programme ohne https -> Hinweis auf die Reihe
     $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
     Assert ($inv -match 'Get-ProviderHttpsHint') 'in der Meldung des Schritts check'
 }
+Test-Case 'Protokoll (7.12.4): Stufe je Konsolenzeile nach Praefix, sonst nach Exit-Code' {
+    Assert-Equal 'Ok' (Get-ConsoleLineLevel -Line '[  OK  ] Datenbank' -ExitCode 1)
+    Assert-Equal 'Warn' (Get-ConsoleLineLevel -Line '[WARNUNG] Mail' -ExitCode 0)
+    Assert-Equal 'Error' (Get-ConsoleLineLevel -Line '[FEHLER] Anmeldestelle' -ExitCode 1)
+    Assert-Equal 'Info' (Get-ConsoleLineLevel -Line '[ INFO ] x' -ExitCode 1)
+    Assert-Equal 'Warn' (Get-ConsoleLineLevel -Line '         Hinweiszeile' -ExitCode 1)
+    Assert-Equal 'Info' (Get-ConsoleLineLevel -Line 'Ergebnis: 1 Fehler' -ExitCode 1 -ExitCodeChecked)
+    Assert-Equal 'Info' (Get-ConsoleLineLevel -Line 'alles gut' -ExitCode 0)
+}
 Test-Case 'Pruefen (7.12.4): Knopf je Modus, vorhandene Installation vor dem Pruefen frisch lesen' {
     Assert-Equal 'Installieren' (Get-RunVerb -Mode 'install')
     Assert-Equal 'Wiederholen' (Get-RunVerb -Mode 'repeat')
