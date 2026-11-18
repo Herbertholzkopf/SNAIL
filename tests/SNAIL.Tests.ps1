@@ -1391,6 +1391,21 @@ Test-Case 'Kaltstart 7.12.2: Aufwaerm-Seite nur an der Website aendern, geerbte 
     $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectWarmup' }, $true)
     Assert ($fn.Extent.Text -match 'Set-SiteAppInit' -and $fn.Extent.Text -notmatch 'Application Initialization konnte nicht eingestellt werden') 'Aufwaerm-Seite bricht den Schritt nicht ab'
 }
+Test-Case 'check des DMS (7.12.4): Programme ohne https -> Hinweis auf die Reihenfolge' {
+    $ue = [string][char]0xFC
+    $lines = @(
+        ('[  OK  ] Anmeldung: eigene Benutzer, Anmeldestelle f' + $ue + 'r die Programme (DMS) (auth.mode = provider)'),
+        ('[FEHLER] Anmeldestelle: Programme nur ' + $ue + 'ber https'),
+        ('         Einmal-Codes und Sitzungen gingen unverschl' + $ue + 'sselt ' + $ue + 'ber das Netz: auftragsprogramm (http://srv-test:21110/), renate (http://srv-test:21120/). In der services.json https-Adressen eintragen (Cloudflare Tunnel oder Zertifikat).')
+    )
+    $items = ConvertFrom-CheckOutput -Lines $lines
+    $h = Get-ProviderHttpsHint -Items $items
+    Assert ($h -match 'zuerst die Programme auftragsprogramm \(http://srv-test:21110/\), renate \(http://srv-test:21120/\)' -and $h -match 'danach beim DMS Einrichtung wiederholen') $h
+    Assert ($h -cmatch '^[\x20-\x7E]+$') "nur ASCII: $h"
+    Assert-Equal '' (Get-ProviderHttpsHint -Items (ConvertFrom-CheckOutput -Lines @('[FEHLER] Datenbank', ('[  OK  ] Anmeldestelle: Programme nur ' + $ue + 'ber https')))) 'nur bei diesem FEHLER'
+    $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
+    Assert ($inv -match 'Get-ProviderHttpsHint') 'in der Meldung des Schritts check'
+}
 Test-Case 'Pruefen (7.12.4): Knopf je Modus, vorhandene Installation vor dem Pruefen frisch lesen' {
     Assert-Equal 'Installieren' (Get-RunVerb -Mode 'install')
     Assert-Equal 'Wiederholen' (Get-RunVerb -Mode 'repeat')

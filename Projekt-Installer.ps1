@@ -3711,6 +3711,21 @@ function Select-ProgramTokenLine {
 }
 
 # Zeile "Anmeldung ueber das DMS (...)" aus der Ausgabe von check bewerten
+<#
+ check des DMS (auth.mode provider) prueft die url aller Programme des Mandanten
+ in der services.json: ohne https -> [FEHLER] "Anmeldestelle: Programme nur
+ ueber https". Beim Umstellen auf https zuerst die Programme, dann das DMS.
+ Liefert den Hinweis fuer die Fehlermeldung oder ''.
+#>
+function Get-ProviderHttpsHint {
+    param($Items = @())
+    $it = @($Items | Where-Object { $_.Status -eq 'FEHLER' -and $_.Label -match '^Anmeldestelle: Programme nur' }) | Select-Object -First 1
+    if (-not $it) { return '' }
+    $progs = @([regex]::Matches([string]$it.Hint, '([a-z0-9_-]+) \((http://[^)\s]+)\)') | ForEach-Object { '{0} ({1})' -f $_.Groups[1].Value, $_.Groups[2].Value })
+    $which = if ($progs.Count -gt 0) { $progs -join ', ' } else { 'des Mandanten' }
+    return ("Reihenfolge beim Umstellen auf https: zuerst die Programme {0} umstellen (app.url auf https, dort Einrichtung wiederholen - das traegt die url in die services.json ein), danach beim DMS Einrichtung wiederholen." -f $which)
+}
+
 function Get-DmsCheckState {
     param($Items = @())
     $it = @($Items | Where-Object { $_.Label -match '^Anmeldung .ber das DMS' }) | Select-Object -First 1
@@ -4861,7 +4876,8 @@ function Invoke-Installation {
                         }
                         if (-not $c.Ok) {
                             $fehler = @($c.Items | Where-Object { $_.Status -eq 'FEHLER' } | ForEach-Object { $_.Label })
-                            throw ("Die Selbstprüfung meldet Fehler (Exit-Code {0}): {1}. Erneut prüfen: php bin\console check" -f $c.ExitCode, $(if ($fehler.Count -gt 0) { $fehler -join '; ' } else { 'siehe Protokoll' }))
+                            $httpsHint = Get-ProviderHttpsHint -Items $c.Items
+                            throw ("Die Selbstpruefung meldet Fehler (Exit-Code {0}): {1}. {2}Erneut pruefen: php bin\console check" -f $c.ExitCode, $(if ($fehler.Count -gt 0) { $fehler -join '; ' } else { 'siehe Protokoll' }), $(if ($httpsHint) { $httpsHint + ' ' } else { '' }))
                         }
                         Write-Log $(if ($c.Summary) { $c.Summary } else { 'Selbstprüfung ohne Fehler.' }) 'Ok'
                         if ($dmsState) {

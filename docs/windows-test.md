@@ -355,6 +355,7 @@ Braucht werner und ein Programm im Modus dms (wie in 18), beide mit Vorlage **ab
 | 21.8 | (Befund SRV-Test 18.11.) werner und Auftragsprogramm „Einrichtung wiederholen“; danach `$init` je Website | `/login` ersetzt durch genau ein `initializationPage="/aufwaermen"`; auf „Prüfen“ „… Aufwaermen … ueber /aufwaermen (aus config\routes.php des Programms …)“ |
 | 21.9 | In der `config.php` eines Programms `app.url` ändern, **ohne** „Neu einlesen“ das Programm wählen → „Erneut prüfen“ | Protokoll „app.url von <Ordner> frisch gelesen: '<neu>' …“; Prüfen und Lauf nutzen die neue Adresse (services.json-Zeile) |
 | 21.10 | Knopf auf „Prüfen“ | Neuinstallation „Installieren“, vorhandener Ordner „Wiederholen“, ZIP bei vorhandener Installation „Aktualisieren“ |
+| 21.11 | (Befund SRV-Test, Umstellung auf https) werner zuerst auf https umstellen und „Einrichtung wiederholen“, solange ein Programm noch eine http-url in der services.json hat | Schritt check ✗ mit „… Anmeldestelle: Programme nur über https. Reihenfolge beim Umstellen auf https: zuerst die Programme <key> (http://…) umstellen …, danach beim DMS Einrichtung wiederholen.“; nach dieser Reihenfolge grün |
 
 ## Ergebnis festhalten
 
