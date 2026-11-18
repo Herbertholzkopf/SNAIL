@@ -42,6 +42,19 @@
       "braucht": []
     },
     {
+      "_doku": "Auftragsprogramm: Auftraege und Baustellen, gebaut aus der projektvorlage, Anmeldung ueber werner (auth.mode dms) - deshalb ohne anmeldestelle.",
+      "key": "auftragsprogramm",
+      "name": "Auftragsprogramm",
+      "icon": "box",
+      "tone": "amber",
+      "logo": "",
+      "description": "Aufträge und Baustellen",
+      "zip": "auftragsprogramm-main.zip",
+      "uploadsMaxMb": 50,
+      "phpModule": [],
+      "braucht": []
+    },
+    {
       "_doku": "Die folgenden Dienste stammen aus der Projektliste von SNAIL 5 (Logos als Dateien unter logos/). Installierbar sind sie, sobald das Programm auf die projektvorlage umgestellt ist und eine ZIP gewaehlt wird.",
       "key": "gertrud",
       "name": "Gertrud",
