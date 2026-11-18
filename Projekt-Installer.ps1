@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.1
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.2
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12.1'
+$script:AppVersion = '7.12.2'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -2028,16 +2028,50 @@ function Get-AppInitPages {
     return @([regex]::Matches([string]$Text, 'initializationPage="([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
 }
 
+<#
+ $Current = Seiten, die an der Website selbst stehen (wirksame Liste ohne die vom
+ Server geerbten - die lassen sich an der Website nicht entfernen, 7.12.1:
+ "Angefordertes Auflistungselement kann nicht gefunden werden"); $Effective = wirksame
+ Liste (steht die Seite schon, auch geerbt, wird nichts hinzugefuegt)
+#>
 function Get-AppInitEditArgs {
-    param([Parameter(Mandatory)][string]$Site, $Current = @(), [Parameter(Mandatory)][string]$Want)
+    param([Parameter(Mandatory)][string]$Site, $Current = @(), [Parameter(Mandatory)][string]$Want, $Effective = $null)
     $sec = '-section:system.webServer/applicationInitialization'
+    $eff = if ($null -ne $Effective) { @($Effective) } else { @($Current) }
     $list = New-Object System.Collections.Generic.List[object]
     $list.Add(@('set', 'config', $Site, $sec, '/doAppInitAfterRestart:true', '/commit:apphost'))
     foreach ($v in @($Current)) {
-        if ($v -ne $Want) { $list.Add(@('set', 'config', $Site, $sec, "/-[initializationPage='$v']", '/commit:apphost')) }
+        if ($v -and $v -ne $Want) { $list.Add(@('set', 'config', $Site, $sec, "/-[initializationPage='$v']", '/commit:apphost')) }
     }
-    if (@($Current) -notcontains $Want) { $list.Add(@('set', 'config', $Site, $sec, "/+[initializationPage='$Want']", '/commit:apphost')) }
+    if ($eff -notcontains $Want) { $list.Add(@('set', 'config', $Site, $sec, "/+[initializationPage='$Want']", '/commit:apphost')) }
     return $list.ToArray()
+}
+
+# Application Initialization der Website setzen; Fehler werden zu Hinweisen (nicht fatal)
+function Set-SiteAppInit {
+    param([Parameter(Mandatory)][string]$Site, [Parameter(Mandatory)][string]$Want)
+    $sec = '-section:system.webServer/applicationInitialization'
+    $hints = New-Object System.Collections.Generic.List[string]
+    $eff = @(Get-AppInitPages ((Invoke-AppCmd @('list', 'config', $Site, $sec)).Lines -join "`n"))
+    $srv = @(Get-AppInitPages ((Invoke-AppCmd @('list', 'config', $sec)).Lines -join "`n"))
+    $own = @($eff | Where-Object { $srv -notcontains $_ })
+    foreach ($a in @(Get-AppInitEditArgs -Site $Site -Current $own -Want $Want -Effective $eff)) {
+        $r = Invoke-AppCmd $a
+        if ($r.ExitCode -ne 0) {
+            $what = $a[4]
+            if ($what -like '/-*') { Write-Log "Aufwaerm-Seite nicht entfernt (appcmd set config $Site ... $what): $($r.Output)" 'Warn' }
+            else { $hints.Add("Application Initialization der Website '$Site' ($what): $($r.Output)") }
+        }
+    }
+    $after = @(Get-AppInitPages ((Invoke-AppCmd @('list', 'config', $Site, $sec)).Lines -join "`n"))
+    if ($after -notcontains $Want) {
+        if ($hints.Count -eq 0) { $hints.Add("Aufwaerm-Seite $Want fehlt an der Website '$Site' (gelesen: $(if ($after.Count) { $after -join ', ' } else { 'leer' })).") }
+        $hints.Add("Von Hand: appcmd set config $Site $sec /+[initializationPage='$Want'] /commit:apphost")
+    } else {
+        $other = @($after | Where-Object { $_ -ne $Want })
+        if ($other.Count -gt 0) { $hints.Add("Website '$Site' ruft beim Start zusaetzlich $($other -join ', ') auf$(if (@($srv | Where-Object { $other -contains $_ }).Count) { ' (geerbt aus der Serverebene, SNAIL aendert sie nicht)' })).") }
+    }
+    return $hints.ToArray()
 }
 
 # IIS-Feature Application Initialization vorhanden? (Modul warmup.dll)
@@ -2064,14 +2098,10 @@ function Set-ProjectWarmup {
     if (-not (Test-AppInitInstalled)) {
         $hints.Add('IIS-Feature Application Initialization fehlt (warmup.dll) - preloadEnabled bleibt ohne Wirkung, die erste Seite nach einem Neustart ist langsam. WIPP (ab 1.11.4) installiert es (Feature IIS-ApplicationInit) - WIPP erneut laufen lassen.')
     } else {
-        $sec = '-section:system.webServer/applicationInitialization'
-        $pages = Get-AppInitPages ((Invoke-AppCmd @('list', 'config', $name, $sec)).Lines -join "`n")
         $warmUrl = Get-WarmupPath -ProgDir $Plan.ProgDir
-        foreach ($a in @(Get-AppInitEditArgs -Site $name -Current $pages -Want $warmUrl)) {
-            $r = Invoke-AppCmd $a
-            if ($r.ExitCode -ne 0) { throw "Application Initialization konnte nicht eingestellt werden: $($r.Output)" }
-        }
-        Write-Log ("Website '{0}': preloadEnabled, Aufwaermen ueber {1} nach jedem Start." -f $name, $warmUrl) 'Ok'
+        $ah = @(Set-SiteAppInit -Site $name -Want $warmUrl)
+        foreach ($h in $ah) { $hints.Add($h) }
+        if ($ah.Count -eq 0) { Write-Log ("Website '{0}': preloadEnabled, Aufwaermen ueber {1} nach jedem Start." -f $name, $warmUrl) 'Ok' }
     }
     return $hints.ToArray()
 }
@@ -2084,7 +2114,11 @@ function Get-FastCgiApps {
         $h = @{}
         foreach ($a in [regex]::Matches($m.Groups[1].Value, '([A-Za-z]+)="([^"]*)"')) { $h[$a.Groups[1].Value] = $a.Groups[2].Value }
         $vars = @{}
-        foreach ($e in [regex]::Matches([string]$m.Groups[3].Value, '<add\s+name="([^"]+)"\s+value="([^"]*)"')) { $vars[$e.Groups[1].Value] = $e.Groups[2].Value }
+        # appcmd zeigt die Eintraege als <environmentVariable name=.. value=..> (7.12.1 suchte <add> und fand nichts)
+        foreach ($e in [regex]::Matches([string]$m.Groups[3].Value, '<(?:environmentVariable|add)\s+([^>]*?)/?>')) {
+            $n = [regex]::Match($e.Groups[1].Value, '\bname="([^"]*)"'); $v = [regex]::Match($e.Groups[1].Value, '\bvalue="([^"]*)"')
+            if ($n.Success) { $vars[$n.Groups[1].Value] = $(if ($v.Success) { $v.Groups[1].Value } else { '' }) }
+        }
         $list.Add([pscustomobject]@{ Attr = $h; Env = $vars })
     }
     return $list.ToArray()
