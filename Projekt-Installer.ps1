@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.3
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.4
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12.3'
+$script:AppVersion = '7.12.4'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -3605,6 +3605,87 @@ function ConvertFrom-DmsAccessOutput {
     return [pscustomobject]@{ Given = $given; Existing = $existing; Unknown = $unknown; Lines = $lines }
 }
 
+<#
+ Admins des DMS im Programm zur Rolle admin hochstufen (Vorlage v1.87, docs/03
+ Schritt 3b): php bin\console dms:admins-uebernehmen im Ordner des PROGRAMMS,
+ bei Neuinstallation und "Einrichtung wiederholen" nach dms:programmzugriff.
+ stdout je Zeile mit festem Praefix:
+   [OK] <login> -> admin | [INFO] <login> schon admin |
+   [WARNUNG] <login>: <Grund> (lokales Konto mit dem Namen) |
+   [INFO] nicht im Modus dms ... | [FEHLER] <code>: <Text>
+   (Codes: dms_zu_alt, dms_nicht_erreichbar, niemand_uebernommen, dms_fehler)
+ Exit 0 = erledigt (auch nichts zu tun), 1 = mindestens ein [FEHLER]/[WARNUNG].
+ Programm aelter als v1.87: "Unbekannter Befehl: ..." auf stderr. Nie fatal.
+#>
+function ConvertFrom-DmsAdminsOutput {
+    param([AllowEmptyString()][string]$Output)
+    $admin = @(); $existing = @(); $conflict = @(); $errors = @(); $lines = @(); $notDms = $false
+    foreach ($l in @(([string]$Output) -split "`r?`n")) {
+        $t = $l.TrimStart([char]0xFEFF).Trim()
+        if ($t -eq '') { continue }
+        $lines += $t
+        if ($t -match '^\[OK\]\s+(\S+)\s+->\s+admin\s*$') { $admin += $Matches[1] }
+        elseif ($t -match '^\[INFO\]\s+nicht im Modus dms') { $notDms = $true }
+        elseif ($t -match '^\[INFO\]\s+(\S+)\s+schon admin\s*$') { $existing += $Matches[1] }
+        elseif ($t -match '^\[WARNUNG\]\s+([^:\s]+):\s*(.*)$') { $conflict += [pscustomobject]@{ Login = $Matches[1]; Reason = $Matches[2].Trim() } }
+        elseif ($t -match '^\[FEHLER\]\s+([a-z_]+):\s*(.*)$') { $errors += [pscustomobject]@{ Code = $Matches[1]; Text = $Matches[2].Trim() } }
+        elseif ($t -match '^\[FEHLER\]\s*(.*)$') { $errors += [pscustomobject]@{ Code = ''; Text = $Matches[1].Trim() } }
+    }
+    return [pscustomobject]@{ Admin = $admin; Existing = $existing; Conflict = $conflict; Errors = $errors; NotDms = $notDms; Lines = $lines }
+}
+
+# Ergebnis von dms:admins-uebernehmen bewerten (ohne Aufruf, fuer die Tests).
+# Kind: ok | notdms | conflict | unknown (Programm kennt den Befehl nicht) | tooold (werner aelter als v1.87) | error
+function Get-DmsAdminsResult {
+    param([int]$ExitCode, [AllowEmptyString()][string]$Output = '', [AllowEmptyString()][string]$ErrorText = '')
+    $p = ConvertFrom-DmsAdminsOutput -Output $Output
+    $err = @(([string]$ErrorText) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    $n = $p.Admin.Count + $p.Existing.Count
+    $sum = ("{0} uebernommen ({1} neu admin, {2} bestand)" -f $n, $p.Admin.Count, $p.Existing.Count)
+    $res = [pscustomobject]@{ Ok = $false; Kind = 'error'; Admin = $p.Admin; Existing = $p.Existing; Conflict = $p.Conflict; Errors = $p.Errors; Lines = $p.Lines; Text = '' }
+    if (@($err | Where-Object { $_ -match '^Unbekannter Befehl:' }).Count -gt 0) {
+        $res.Kind = 'unknown'
+        $res.Text = 'Admins aus werner nicht uebernommen: das Programm kennt dms:admins-uebernehmen noch nicht (Vorlage aelter als v1.87) - Programm aktualisieren, dann Einrichtung wiederholen; bis dahin die Rolle admin im Programm von Hand setzen.'
+    } elseif (@($p.Errors | Where-Object { $_.Code -eq 'dms_zu_alt' }).Count -gt 0) {
+        $res.Kind = 'tooold'
+        $res.Text = 'Admins aus werner nicht uebernommen: werner ist aelter als Vorlage v1.87 (liefert die Angabe admin nicht) - werner zuerst aktualisieren, dann bei diesem Programm Einrichtung wiederholen.'
+    } elseif ($p.Errors.Count -gt 0) {
+        $e = $p.Errors[0]
+        $res.Text = ("Admins aus werner nicht uebernommen: {0}{1} - Rolle admin im Programm von Hand setzen oder nach Behebung Einrichtung wiederholen ({2})." -f $(if ($e.Code) { $e.Code + ': ' } else { '' }), $e.Text, $sum)
+    } elseif ($p.Conflict.Count -gt 0) {
+        $res.Kind = 'conflict'
+        $res.Text = ("Admins aus werner: Konflikt bei {0} - im Programm gibt es ein lokales Konto mit diesem Namen, nicht mit werner verknuepft; dort unter System -> Benutzer klaeren ({1})." -f (($p.Conflict | ForEach-Object { $_.Login }) -join ', '), $sum)
+    } elseif ($ExitCode -eq 0 -and $p.NotDms) {
+        $res.Ok = $true; $res.Kind = 'notdms'
+        $res.Text = 'Admins aus werner: Programm nicht im Modus dms - nichts zu tun.'
+    } elseif ($ExitCode -eq 0) {
+        $res.Ok = $true; $res.Kind = 'ok'
+        $res.Text = "Admins aus werner: $sum."
+    } else {
+        $last = if ($err.Count -gt 0) { $err[-1] } else { "Exit-Code $ExitCode" }
+        $res.Text = ("Admins aus werner nicht uebernommen: {0} - Rolle admin im Programm von Hand setzen oder nach Behebung Einrichtung wiederholen." -f $last)
+    }
+    $res.Text = Hide-ProgramToken -Text $res.Text
+    return $res
+}
+
+function Invoke-DmsAdminsAdopt {
+    param([Parameter(Mandatory)]$Plan)
+    $console = Join-Path (Join-Path $Plan.ProgDir 'bin') 'console'
+    if (-not (Test-Path -LiteralPath $console)) { return (Get-DmsAdminsResult -ExitCode 1 -ErrorText "Konsole des Programms nicht gefunden: $console") }
+    Write-Log 'php bin\console dms:admins-uebernehmen (im Programmordner)'
+    try {
+        $r = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs @($console, 'dms:admins-uebernehmen')) -WorkingDirectory $Plan.ProgDir -Utf8Output -TimeoutSec 120
+    } catch {
+        return (Get-DmsAdminsResult -ExitCode 1 -ErrorText ('dms:admins-uebernehmen: ' + $_.Exception.Message))
+    }
+    $res = Get-DmsAdminsResult -ExitCode $r.ExitCode -Output ([string]$r.Output) -ErrorText ([string]$r.Error)
+    if ($res.Kind -ne 'unknown') { foreach ($l in $res.Lines) { Write-Log ('  ' + (Hide-ProgramToken -Text $l)) } }
+    foreach ($l in @(([string]$r.Error) -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -First 5)) { Write-Log ('  ' + (Hide-ProgramToken -Text $l.Trim())) $(if ($r.ExitCode -eq 0) { 'Info' } else { 'Warn' }) }
+    Write-Log $res.Text $(if ($res.Ok) { 'Ok' } else { 'Warn' })
+    return $res
+}
+
 # Token-artige Teile einer Zeile unkenntlich machen (fuer Protokoll und Meldungen)
 function Hide-ProgramToken {
     param([AllowEmptyString()][string]$Text)
@@ -4552,6 +4633,7 @@ function Invoke-Installation {
         AppKey = [pscustomobject]@{ Status = ''; Key = ''; Changed = @(); Backup = ''; Text = '' }
         DmsToken = [pscustomobject]@{ Status = ''; Value = ''; Generated = $false; Backup = ''; Text = '' }
         DmsAccess = $null
+        DmsAdmins = $null
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $steps = Get-StepPlan -Plan $Plan
@@ -4716,6 +4798,15 @@ function Invoke-Installation {
                             }
                         } else {
                             Write-Log 'Programmzugriff im DMS: unveraendert (Token behalten - die Zugriffe verwaltet der Admin im DMS).'
+                        }
+                        # Admins des DMS im Programm zur Rolle admin hochstufen (Neuinstallation und Wiederholen, 7.12.4)
+                        if ($Plan.Mode -ne 'update') {
+                            $ad = Invoke-DmsAdminsAdopt -Plan $Plan
+                            $script:Result.DmsAdmins = $ad
+                            if (-not $ad.Ok) {
+                                $rows.Add(@{ Level = 'Warn'; Name = 'Admins aus werner'; Text = $ad.Text })
+                                if ($state -eq 'Done') { $state = 'Warn' }
+                            }
                         }
                     }
                     'migrate' {
@@ -5651,6 +5742,10 @@ function Get-FinishAccess {
     if ($r.DmsAccess) {
         $da = $r.DmsAccess
         $lines.Add($(if ($da.Ok) { ("Zugriff DMS: Programmzugriff im DMS: {0} Admin(s)" -f (@($da.Given).Count + @($da.Existing).Count)) } else { 'Zugriff DMS: nicht vollstaendig gesetzt - siehe Hinweise unten' }))
+    }
+    if ($r.DmsAdmins) {
+        $dd = $r.DmsAdmins
+        $lines.Add($(if ($dd.Kind -eq 'notdms') { 'Admins DMS : nicht im Modus dms - nichts zu tun' } elseif ($dd.Ok) { ("Admins DMS : {0} uebernommen ({1} neu admin, {2} bestand)" -f (@($dd.Admin).Count + @($dd.Existing).Count), @($dd.Admin).Count, @($dd.Existing).Count) } else { 'Admins DMS : nicht (vollstaendig) uebernommen - siehe Hinweise unten' }))
     }
     if ($ak.Key -and @('new', 'added', 'manual') -contains $ak.Status) {
         $secrets.Add([pscustomobject]@{ Label = $(if ($ak.Status -eq 'manual') { 'app.key (Vorschlag)' } else { 'app.key' }); Value = [string]$ak.Key })

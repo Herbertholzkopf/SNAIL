@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12.3“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Auftragsprogramm (Beschreibung „Aufträge und Baustellen“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12.4“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Auftragsprogramm (Beschreibung „Aufträge und Baustellen“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.3.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.4.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -338,6 +338,20 @@ Braucht werner (Katalog „werner“, `anmeldestelle`) und ein zweites Programm 
 | 20.9 | `iisreset`, dann 30 s warten und **ohne** vorherigen Aufruf im Browser die Startseite öffnen; Zeit im Netzwerk-Tab | `w3wp.exe` für den Pool läuft schon vor dem ersten Aufruf (Task-Manager, Benutzer = App-Pool), erste Seite schnell (kein Kaltstart von ~5 s) |
 | 20.10 | Leerlauf > 20 min (bzw. über Nacht), dann erste Seite | schnell; `w3wp.exe` mit derselben PID wie vorher (bis zum Recycling um 03:MM) |
 | 20.11 | Ereignisanzeige → Windows-Protokolle → System, Quelle WAS, nach 03:MM | ein Recycling-Eintrag „… geplanter Zeitpunkt“ je Pool, nicht mehr alle 29 h |
+
+## 21 Admins aus werner übernehmen (SNAIL 7.12.4)
+
+Braucht werner und ein Programm im Modus dms (wie in 18), beide mit Vorlage **ab v1.87**; im DMS mindestens zwei aktive Admins.
+
+| # | Schritt | Erwartet |
+|---|---|---|
+| 21.1 | Programm neu einrichten (wie 18.5) | Protokoll nach „dms:programmzugriff …“: „php bin\console dms:admins-uebernehmen (im Programmordner)“, je Admin „[OK] <login> -> admin“, „Admins aus werner: N uebernommen (N neu admin, 0 bestand).“; „Fertig“: „Admins DMS : N uebernommen …“; im Programm unter System → Benutzer haben die Admins des DMS die Rolle admin |
+| 21.2 | „Einrichtung wiederholen“ | erneut aufgerufen, jetzt „[INFO] <login> schon admin“, „… (0 neu admin, N bestand)“; kein ⚠ |
+| 21.3 | Aktualisieren | **kein** Aufruf von dms:admins-uebernehmen |
+| 21.4 | Im Programm ein lokales Konto mit dem Login eines DMS-Admins anlegen, dann „Einrichtung wiederholen“ | ⚠ „Admins aus werner: Konflikt bei <login> – … unter System -> Benutzer klaeren“; Lauf endet normal |
+| 21.5 | werner mit Vorlage < v1.87, Programm ≥ v1.87, „Einrichtung wiederholen“ | ⚠ „… werner zuerst aktualisieren, dann bei diesem Programm Einrichtung wiederholen.“ (im Protokoll „[FEHLER] dms_zu_alt: …“) |
+| 21.6 | Programm mit Vorlage < v1.87 | ⚠ „… das Programm kennt dms:admins-uebernehmen noch nicht …“; Lauf endet normal |
+| 21.7 | werner beenden (App-Pool stoppen), „Einrichtung wiederholen“ beim Programm | ⚠ „… dms_nicht_erreichbar: Das DMS ist nicht erreichbar …“; danach werner wieder starten |
 
 ## Ergebnis festhalten
 

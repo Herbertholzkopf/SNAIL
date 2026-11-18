@@ -1506,6 +1506,54 @@ Test-Case 'dms:programmzugriff: Ausgabe zerlegen (gegeben, bestand, unbekannt, B
     $res.DmsAccess = [pscustomobject]@{ Ok = $false; Given = @(); Existing = @(); Unknown = @(); Text = 'x' }
     Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'nicht vollstaendig') 'Fertig bei Fehler'
 }
+Test-Case 'dms:admins-uebernehmen (7.12.4): Ausgabe zerlegen und bewerten (Codes, nicht Texte), nie fatal' {
+    $ae = [string][char]0xE4
+    $p = ConvertFrom-DmsAdminsOutput -Output ([string][char]0xFEFF + "[OK] chefin -> admin`r`n[INFO] admin schon admin`n[WARNUNG] max: lokales Konto tr${ae}gt den Namen`n[FEHLER] dms_fehler: kaputt`n`n")
+    Assert-Equal 'chefin' ($p.Admin -join ','); Assert-Equal 'admin' ($p.Existing -join ','); Assert-Equal 'max' (($p.Conflict | ForEach-Object { $_.Login }) -join ',')
+    Assert-Equal 'dms_fehler' $p.Errors[0].Code; Assert (-not $p.NotDms) 'dms'
+    $ok = Get-DmsAdminsResult -ExitCode 0 -Output "[OK] chefin -> admin`n[INFO] admin schon admin`n"
+    Assert ($ok.Ok -and $ok.Kind -eq 'ok' -and $ok.Text -match '2 uebernommen \(1 neu admin, 1 bestand\)') $ok.Text
+    $nd = Get-DmsAdminsResult -ExitCode 0 -Output ("[INFO] nicht im Modus dms " + [char]0x2014 + " nichts zu tun`n")
+    Assert ($nd.Ok -and $nd.Kind -eq 'notdms') $nd.Text
+    $c = Get-DmsAdminsResult -ExitCode 1 -Output "[OK] chefin -> admin`n[WARNUNG] max: lokales Konto tr${ae}gt den Namen`n"
+    Assert (-not $c.Ok -and $c.Kind -eq 'conflict' -and $c.Text -match 'Konflikt bei max' -and $c.Text -match '1 uebernommen') $c.Text
+    $u = Get-DmsAdminsResult -ExitCode 1 -Output "Verf${ae}gbare Befehle:`n  check  ..." -ErrorText "Unbekannter Befehl: dms:admins-uebernehmen`n"
+    Assert ($u.Kind -eq 'unknown' -and $u.Text -match 'aelter als v1\.87' -and $u.Text -match 'Programm aktualisieren') $u.Text
+    $o = Get-DmsAdminsResult -ExitCode 1 -Output "[FEHLER] dms_zu_alt: Das DMS liefert keine Angabe admin`n"
+    Assert ($o.Kind -eq 'tooold' -and $o.Text -match 'werner zuerst aktualisieren, dann bei diesem Programm Einrichtung wiederholen') $o.Text
+    $e = Get-DmsAdminsResult -ExitCode 1 -Output "[FEHLER] dms_nicht_erreichbar: Das DMS ist nicht erreichbar: Zeitueberschreitung`n"
+    Assert ($e.Kind -eq 'error' -and $e.Text -match 'dms_nicht_erreichbar: Das DMS ist nicht erreichbar' -and $e.Text -match 'von Hand') $e.Text
+    $nn = Get-DmsAdminsResult -ExitCode 1 -Output "[FEHLER] niemand_uebernommen: Niemand uebernommen: keine aktiven Admins`n"
+    Assert ($nn.Kind -eq 'error' -and $nn.Text -match 'niemand_uebernommen') $nn.Text
+    $s2 = Get-DmsAdminsResult -ExitCode 255 -ErrorText "PHP Fatal error: x`nletzte Zeile"
+    Assert ($s2.Kind -eq 'error' -and $s2.Text -match 'letzte Zeile') "ohne [FEHLER]: letzte stderr-Zeile: $($s2.Text)"
+    $t = Get-DmsAdminsResult -ExitCode 1 -Output ('[FEHLER] dms_fehler: pt1_' + ('A' * 40))
+    Assert ($t.Text -notmatch 'pt1_A') 'kein Token in der Meldung'
+    foreach ($x in @($ok, $nd, $c, $u, $o)) { Assert ($x.Text -cmatch '^[\x20-\x7E]+$') "nur ASCII: $($x.Text)" }
+    # Aufruf mit nachgebildeter Konsole (echtes php)
+    $pd = Join-Path $tmp 'admins-prog'; New-Item -ItemType Directory -Path (Join-Path $pd 'bin') -Force | Out-Null
+    $plan = [pscustomobject]@{ ProgDir = $pd; PhpExe = $PhpExe }
+    [System.IO.File]::WriteAllText((Join-Path $pd 'bin/console'), "<?php`nif ((`$argv[1] ?? '') !== 'dms:admins-uebernehmen') { fwrite(STDERR, 'falsch'); exit(2); }`necho `"[OK] chefin -> admin\n[INFO] admin schon admin\n`"; exit(0);`n")
+    $r = Invoke-DmsAdminsAdopt -Plan $plan
+    Assert ($r.Ok -and @($r.Admin).Count -eq 1 -and @($r.Existing).Count -eq 1) $r.Text
+    [System.IO.File]::WriteAllText((Join-Path $pd 'bin/console'), "<?php`nfwrite(STDERR, `"Unbekannter Befehl: {`$argv[1]}\n\n`"); echo `"Verfuegbare Befehle:\n`"; exit(1);`n")
+    $r = Invoke-DmsAdminsAdopt -Plan $plan
+    Assert ($r.Kind -eq 'unknown') $r.Text
+    $r = Invoke-DmsAdminsAdopt -Plan ([pscustomobject]@{ ProgDir = (Join-Path $tmp 'gibtsnicht'); PhpExe = $PhpExe })
+    Assert (-not $r.Ok -and $r.Text -match 'Konsole des Programms nicht gefunden') $r.Text
+    # Fertig
+    $res = New-TestResult
+    $res.DmsAdmins = $ok
+    Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'Admins DMS : 2 uebernommen \(1 neu admin, 1 bestand\)') 'Fertig'
+    $res.DmsAdmins = $o
+    Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'Admins DMS : nicht') 'Fertig bei Hinweis'
+    # Skript: nur bei Neuinstallation/Wiederholen, im Schritt dmstoken, nach dms:programmzugriff, nicht fatal
+    $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
+    $iG = $inv.IndexOf('Grant-DmsProgramAccess'); $iA = $inv.IndexOf('Invoke-DmsAdminsAdopt')
+    Assert ($iG -gt 0 -and $iA -gt $iG) 'nach dms:programmzugriff'
+    Assert ($inv.Substring([Math]::Max(0, $iA - 200), 200) -match "Mode -ne 'update'") 'nicht beim Aktualisieren'
+    Assert ($inv.Substring($iA, 400) -notmatch 'throw') 'kein Abbruch'
+}
 Test-Case 'Skript: dms:programmzugriff nur nach einem neu ausgestellten Token (nicht beim behaltenen)' {
     $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Grant-DmsProgramAccess' }, $true))
     Assert-Equal 1 $calls.Count 'genau ein Aufruf'
