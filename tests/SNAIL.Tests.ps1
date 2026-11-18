@@ -165,6 +165,17 @@ Test-Case 'Katalog: werner (DMS) mit eigener ZIP, Icon archive gibt es im Design
     $icons = [System.IO.File]::ReadAllText((Join-Path $Vorlage 'public/assets/ds/icons.svg'))
     Assert ($icons.Contains('id="i-archive"')) 'Icon archive im Designsystem'
 }
+Test-Case 'Katalog: Auftragsprogramm (7.12.3) wie auf SRV-Test eingetragen, ohne anmeldestelle' {
+    $a = $catalog.Services['auftragsprogramm']
+    Assert ($null -ne $a) 'im Katalog'
+    Assert-Equal 'Auftragsprogramm' $a.Name; Assert-Equal 'box' $a.Icon; Assert-Equal 'amber' $a.Tone
+    Assert-Equal ('Auftr' + [char]0xE4 + 'ge und Baustellen') $a.Description
+    Assert-Equal 50 $a.UploadsMaxMb; Assert-Equal 0 @($a.PhpModules).Count
+    Assert-Equal 'auftragsprogramm-main.zip' ([System.IO.Path]::GetFileName($a.Zip))
+    $raw = @($json.dienste | Where-Object { $_.key -eq 'auftragsprogramm' })[0]
+    Assert ($null -eq $raw.anmeldestelle) 'kein anmeldestelle (Anmeldung ueber werner)'
+    Assert $script:TileIcons.ContainsKey($a.Icon) 'Symbol zeichenbar'
+}
 Test-Case 'Vorlage aus dem Skript ("Katalog-Vorlage anlegen") ist gueltig' {
     $t = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:JsonTemplate' }, $true)
     $text = $t.Right.Extent.Text -replace "^@'\r?\n", '' -replace "\r?\n'@$", ''
