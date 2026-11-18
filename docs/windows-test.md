@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12.1“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.0.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.1.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -332,6 +332,7 @@ Braucht werner (Katalog „werner“, `anmeldestelle`) und ein zweites Programm 
 | 20.6 | Noch einmal „Einrichtung wiederholen“, dann 20.4/20.5 | unverändert, keine doppelten Einträge |
 | 20.7 | Von Hand `& $appcmd set apppool projekt /+recycling.periodicRestart.schedule.[value='02:00:00']`, wiederholen | 02:00 wieder entfernt, nur 03:MM bleibt |
 | 20.7a | Programm mit Vorlage vor 1.64 erst einrichten, dann auf ≥ 1.64 aktualisieren | erst `/login`, nach dem Aktualisieren genau ein `/aufwaermen` |
+| 20.7b | (7.12.1, Befund SRV-Test) Vorher: `& $appcmd list config -section:system.applicationHost/applicationPools` notieren; dann A aktualisieren | kein ✗ mehr bei „Kaltstart vermeiden“; Protokoll höchstens ⚠ „Recycling-Zeitpunkt nicht entfernt …“; danach steht am Pool genau `03:MM:00`. Steht unter `applicationPoolDefaults` ein `<schedule>`, Warnung „recycelt zusaetzlich um … geerbt aus applicationPoolDefaults“ – SNAIL ändert die Vorgaben nicht |
 | 20.8 | B einrichten bzw. aktualisieren | anderer Zeitpunkt 03:MM als A (je Ordner versetzt) |
 | 20.9 | `iisreset`, dann 30 s warten und **ohne** vorherigen Aufruf im Browser die Startseite öffnen; Zeit im Netzwerk-Tab | `w3wp.exe` für den Pool läuft schon vor dem ersten Aufruf (Task-Manager, Benutzer = App-Pool), erste Seite schnell (kein Kaltstart von ~5 s) |
 | 20.10 | Leerlauf > 20 min (bzw. über Nacht), dann erste Seite | schnell; `w3wp.exe` mit derselben PID wie vorher (bis zum Recycling um 03:MM) |

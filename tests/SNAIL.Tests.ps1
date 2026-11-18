@@ -1216,10 +1216,11 @@ Test-Case 'Kaltstart: Recycling-Zeitpunkt je Programm stabil 03:MM, Zeitplan und
     Assert-Equal ("02:00:00,$a") ((Get-AppPoolScheduleValues $pool) -join ',')
     $ed = @(Get-ScheduleEditArgs -Pool 'werner' -Current @('02:00:00', $a) -Want $a)
     Assert-Equal 1 $ed.Count 'nur den fremden Zeitpunkt entfernen'
-    Assert-Equal "/-recycling.periodicRestart.schedule.[value='02:00:00']" $ed[0][3]
+    Assert-Equal "/-[name='werner'].recycling.periodicRestart.schedule.[value='02:00:00']" $ed[0][3]
+    Assert ($ed[0] -contains '-section:system.applicationHost/applicationPools' -and $ed[0] -contains '/commit:apphost') 'Abschnitt applicationPools'
     Assert-Equal 0 @(Get-ScheduleEditArgs -Pool 'werner' -Current @($a) -Want $a).Count 'schon richtig: nichts tun'
     $ed = @(Get-ScheduleEditArgs -Pool 'werner' -Current @() -Want $a)
-    Assert-Equal "/+recycling.periodicRestart.schedule.[value='$a']" $ed[0][3] 'leer: hinzufuegen'
+    Assert-Equal "/+[name='werner'].recycling.periodicRestart.schedule.[value='$a']" $ed[0][3] 'leer: hinzufuegen'
     Assert-Equal 0 @(Get-AppPoolScheduleValues '<add name="x"><recycling><periodicRestart time="00:00:00"><schedule /></periodicRestart></recycling></add>').Count 'leerer Zeitplan'
     $c = Get-AppPoolWarmCheck -Text $pool -Want $a
     Assert ($c.Level -eq 'Warn' -and $c.Text -match 'startMode OnDemand' -and $c.Text -match '00:20:00' -and $c.Text -match '1.05:00:00' -and $c.Text -match '02:00:00') $c.Text
@@ -1240,6 +1241,81 @@ Test-Case 'Kaltstart: Recycling-Zeitpunkt je Programm stabil 03:MM, Zeitplan und
     [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/aufwaermen', [WarmUpController::class, 'show'], Router::NO_SESSION);")
     Assert-Equal '/aufwaermen' (Get-WarmupPath -ProgDir $wp) 'Vorlage ab 1.64'
     Assert-Equal '/login' (Get-WarmupPath -ProgDir '') 'kein Programmordner'
+}
+Test-Case 'Kaltstart 7.12.1: Zeitplan nur am Pool aendern, geerbte Eintraege (applicationPoolDefaults) nicht entfernen' {
+    $want = Get-RecycleTime -Ordner 'werner'
+    # appcmd list config -section:system.applicationHost/applicationPools (nur gesetzte Werte)
+    $sect = @'
+<system.applicationHost>
+  <applicationPools>
+    <add name="DefaultAppPool" />
+    <add name="werner" managedRuntimeVersion="" startMode="AlwaysRunning">
+      <processModel identityType="ApplicationPoolIdentity" idleTimeout="00:00:00" />
+      <recycling>
+        <periodicRestart time="00:00:00">
+          <schedule>
+            <add value="04:00:00" />
+          </schedule>
+        </periodicRestart>
+      </recycling>
+    </add>
+    <add name="dms" managedRuntimeVersion="" />
+    <applicationPoolDefaults managedRuntimeVersion="v4.0">
+      <processModel identityType="ApplicationPoolIdentity" />
+      <recycling>
+        <periodicRestart>
+          <schedule>
+            <add value="01:30:00" />
+          </schedule>
+        </periodicRestart>
+      </recycling>
+    </applicationPoolDefaults>
+  </applicationPools>
+</system.applicationHost>
+'@
+    $c = Get-PoolScheduleConfig -Text $sect -Pool 'WERNER'
+    Assert-Equal '04:00:00' ($c.Pool -join ',') 'am Pool'
+    Assert-Equal '01:30:00' ($c.Defaults -join ',') 'Vorgaben'
+    Assert-Equal 0 @((Get-PoolScheduleConfig -Text $sect -Pool 'dms').Pool).Count 'dms: nichts am Pool'
+    Assert-Equal 0 @((Get-PoolScheduleConfig -Text 'ERROR ( message:kaputt )' -Pool 'x').Pool).Count 'keine XML-Ausgabe'
+    $ed = @(Get-ScheduleEditArgs -Pool 'werner' -Current $c.Pool -Want $want)
+    Assert-Equal 2 $ed.Count 'eigenen alten Zeitpunkt weg, neuen dazu - 01:30 (geerbt) nicht anfassen'
+    Assert (@(@($ed | ForEach-Object { $_[3] }) -match '01:30').Count -eq 0) 'geerbter Eintrag bleibt'
+    # Ablauf mit nachgebildetem appcmd: Entfernen scheitert (wie auf SRV-Test), Hinzufuegen klappt
+    $script:calls = New-Object System.Collections.Generic.List[string]
+    $script:effective = @('01:30:00', '04:00:00')
+    function Invoke-AppCmd {
+        param([string[]]$Arguments)
+        $script:calls.Add(($Arguments -join ' '))
+        if ($Arguments[0] -eq 'list' -and $Arguments[1] -eq 'config') { return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @($sect -split "`n") } }
+        if ($Arguments[0] -eq 'list' -and $Arguments[1] -eq 'apppool') {
+            $adds = ($script:effective | ForEach-Object { "<add value=""$_"" />" }) -join ''
+            return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @("<add name=""werner""><recycling><periodicRestart time=""00:00:00""><schedule>$adds</schedule></periodicRestart></recycling></add>") }
+        }
+        if ($Arguments[3] -like '/-*') { return [pscustomobject]@{ ExitCode = 1168; Output = 'ERROR ( message:Angefordertes Auflistungselement kann nicht gefunden werden. )'; Lines = @() } }
+        if ($Arguments[3] -like '/+*') { $script:effective += $want; return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @() } }
+        return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @() }
+    }
+    $script:LogLines.Clear()
+    $h = @(Set-PoolSchedule -Pool 'werner' -Want $want)
+    Assert ((@($script:LogLines) -join ' ') -match 'nicht entfernt') 'Fehler beim Entfernen nur protokolliert'
+    Assert-Equal 1 $h.Count ($h -join ' | ')
+    Assert ($h[0] -match '01:30:00' -and $h[0] -match 'applicationPoolDefaults' -and $h[0] -match '04:00:00') $h[0]
+    $script:effective = @($want)
+    $sect2 = $sect -replace '<add value="04:00:00" />', "<add value=""$want"" />" -replace '<add value="01:30:00" />', ''
+    $sect = $sect2
+    $script:calls.Clear()
+    Assert-Equal 0 @(Set-PoolSchedule -Pool 'werner' -Want $want).Count 'schon richtig: keine Hinweise'
+    Assert (@(@($script:calls) -match '^set ').Count -eq 0) 'schon richtig: nichts geschrieben'
+    $script:effective = @()
+    $sect = $sect2 -replace "<add value=""$want"" />", ''
+    function Invoke-AppCmd { param([string[]]$Arguments) if ($Arguments[0] -eq 'list' -and $Arguments[1] -eq 'config') { return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @($sect -split "`n") } }; if ($Arguments[0] -eq 'list') { return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @('<add name="werner"><recycling><periodicRestart><schedule /></periodicRestart></recycling></add>') } }; return [pscustomobject]@{ ExitCode = 13; Output = 'ERROR ( message:gesperrt )'; Lines = @() } }
+    $h = @(Set-PoolSchedule -Pool 'werner' -Want $want)
+    Assert ($h.Count -eq 1 -and $h[0] -match 'konnte nicht gesetzt werden' -and $h[0] -match 'gesperrt') "Hinzufuegen scheitert -> Hinweis statt Abbruch: $($h -join ' | ')"
+    Remove-Item Function:\Invoke-AppCmd
+    foreach ($x in $h) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
+    $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectWarmup' }, $true)
+    Assert ($fn.Extent.Text -match 'Set-PoolSchedule' -and $fn.Extent.Text -notmatch 'Recycling-Zeitplan konnte nicht gesetzt werden: \$\(\$r\.Output\)" \}') 'Zeitplan bricht den Schritt nicht ab'
 }
 Test-Case 'Kaltstart: OPcache/realpath_cache bewerten, opcache.file_cache muss leer sein' {
     $good = @{ loaded = '1'; 'opcache.enable' = '1'; 'opcache.memory_consumption' = '256'; 'opcache.max_accelerated_files' = '20000'; 'opcache.validate_timestamps' = '1'; 'opcache.revalidate_freq' = '60'; realpath_cache_size = '4096K'; realpath_cache_ttl = '600'; 'opcache.file_cache' = '' }
