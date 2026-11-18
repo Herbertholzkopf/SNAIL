@@ -1148,7 +1148,7 @@ $fastCgiOut = @'
     <application fullPath="C:\Program Files\PHP\php-cgi.exe" arguments="-d memory_limit=512M" activityTimeout="1200" requestTimeout="1200" />
     <application fullPath="C:\Program Files\PHP\php-cgi.exe" activityTimeout="600" requestTimeout="900" instanceMaxRequests="10000">
       <environmentVariables>
-        <add name="PHP_FCGI_MAX_REQUESTS" value="10000" />
+        <environmentVariable name="PHP_FCGI_MAX_REQUESTS" value="10000" />
       </environmentVariables>
     </application>
     <application fullPath="D:\PHP84\php-cgi.exe" />
@@ -1177,7 +1177,8 @@ Test-Case 'FastCGI-Hinweis auf Pruefen: unter 960 s Warnung, sonst OK, fehlt -> 
 Test-Case 'Kaltstart: FastCGI idleTimeout/instanceMaxRequests/PHP_FCGI_MAX_REQUESTS nur pruefen (WIPP setzt global)' {
     $apps = @(Get-FastCgiApps $fastCgiOut)
     Assert-Equal 3 $apps.Count 'drei Anwendungen'
-    Assert-Equal '10000' $apps[1].Env['PHP_FCGI_MAX_REQUESTS'] 'Umgebungsvariable gelesen'
+    Assert-Equal '10000' $apps[1].Env['PHP_FCGI_MAX_REQUESTS'] 'Umgebungsvariable gelesen (<environmentVariable>, so zeigt es appcmd; 7.12.1 fand sie nicht)'
+    Assert-Equal '7' (@(Get-FastCgiApps '<fastCgi><application fullPath="x"><environmentVariables><environmentVariable value="7" name="A" /></environmentVariables></application></fastCgi>')[0].Env['A']) 'Reihenfolge der Attribute egal'
     $w = Get-FastCgiWarmCheck -FastCgiText $fastCgiOut -PhpExe 'C:\Program Files\PHP\php.exe'
     Assert-Equal 'Warn' $w.Level $w.Text
     Assert ($w.Text -match 'idleTimeout 300 s' -and $w.Text -match 'idleTimeout >= 3600' -and $w.Text -notmatch 'instanceMaxRequests =' -and $w.Text -match 'WIPP \(ab 1\.11\.4\) erneut') $w.Text
@@ -1316,6 +1317,58 @@ Test-Case 'Kaltstart 7.12.1: Zeitplan nur am Pool aendern, geerbte Eintraege (ap
     foreach ($x in $h) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
     $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectWarmup' }, $true)
     Assert ($fn.Extent.Text -match 'Set-PoolSchedule' -and $fn.Extent.Text -notmatch 'Recycling-Zeitplan konnte nicht gesetzt werden: \$\(\$r\.Output\)" \}') 'Zeitplan bricht den Schritt nicht ab'
+}
+Test-Case 'Kaltstart 7.12.2: Aufwaerm-Seite nur an der Website aendern, geerbte nicht entfernen, Fehler nicht fatal' {
+    $ia = @(Get-AppInitEditArgs -Site 'werner' -Current @() -Want '/aufwaermen' -Effective @('/'))
+    Assert-Equal 2 $ia.Count 'geerbte Seite / nicht entfernen, /aufwaermen dazu'
+    Assert-Equal "/+[initializationPage='/aufwaermen']" $ia[1][4]
+    Assert-Equal 1 @(Get-AppInitEditArgs -Site 'werner' -Current @() -Want '/aufwaermen' -Effective @('/aufwaermen')).Count 'geerbt schon da: nichts hinzufuegen'
+    # nachgebildetes appcmd: Serverebene hat '/', die Website erbt es; Entfernen scheitert
+    $script:site = @('/')
+    $script:server = @('/')
+    $script:calls = New-Object System.Collections.Generic.List[string]
+    $script:addFails = $false
+    $mkOut = { param($pages) '<system.webServer><applicationInitialization doAppInitAfterRestart="true">' + (($pages | ForEach-Object { "<add initializationPage=""$_"" />" }) -join '') + '</applicationInitialization></system.webServer>' }
+    function Invoke-AppCmd {
+        param([string[]]$Arguments)
+        $script:calls.Add(($Arguments -join ' '))
+        if ($Arguments[0] -eq 'list') {
+            $pages = if ($Arguments.Count -eq 4) { $script:site } else { $script:server }
+            if ($Arguments[2] -like '-section:*') { $pages = $script:server }
+            return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @(& $mkOut $pages) }
+        }
+        $what = $Arguments[4]
+        if ($what -like '/-*') { return [pscustomobject]@{ ExitCode = 1168; Output = 'ERROR ( message:Angefordertes Auflistungselement kann nicht gefunden werden. )'; Lines = @() } }
+        if ($what -like '/+*') {
+            if ($script:addFails) { return [pscustomobject]@{ ExitCode = 1168; Output = 'ERROR ( message:Angefordertes Auflistungselement kann nicht gefunden werden. )'; Lines = @() } }
+            $script:site += ($what -replace "^/\+\[initializationPage='(.*)'\]$", '$1')
+        }
+        return [pscustomobject]@{ ExitCode = 0; Output = ''; Lines = @() }
+    }
+    $h = @(Set-SiteAppInit -Site 'werner' -Want '/aufwaermen')
+    Assert (@(@($script:calls) -match '^list config werner ').Count -gt 0) 'Website gelesen'
+    Assert (@(@($script:calls) -match '^list config -section:').Count -gt 0) 'Serverebene gelesen'
+    Assert (@(@($script:calls) -match "/-\[initializationPage='/'\]").Count -eq 0) 'geerbte Seite / nicht entfernt'
+    Assert (@(@($script:calls) -match "/\+\[initializationPage='/aufwaermen'\]").Count -gt 0) '/aufwaermen hinzugefuegt'
+    Assert ($h.Count -eq 1 -and $h[0] -match 'zusaetzlich /' -and $h[0] -match 'Serverebene') ($h -join ' | ')
+    # alte eigene Seite /login: Entfernen scheitert -> nur Protokoll, /aufwaermen trotzdem gesetzt
+    $script:site = @('/login'); $script:server = @(); $script:calls.Clear(); $script:LogLines.Clear()
+    $h = @(Set-SiteAppInit -Site 'werner' -Want '/aufwaermen')
+    Assert ((@($script:LogLines) -join ' ') -match 'nicht entfernt') 'Entfernen: nur Warnung im Protokoll'
+    Assert (@(@($script:calls) -match "/\+\[initializationPage='/aufwaermen'\]").Count -gt 0) 'trotzdem hinzugefuegt'
+    Assert ($h.Count -eq 1 -and $h[0] -match 'zusaetzlich /login') ($h -join ' | ')
+    # Hinzufuegen scheitert (Befund SRV-Test 18.11.) -> Hinweise statt Abbruch, mit Befehl fuer Hand
+    $script:site = @(); $script:server = @(); $script:addFails = $true
+    $h = @(Set-SiteAppInit -Site 'werner' -Want '/aufwaermen')
+    Assert ($h.Count -eq 2 -and $h[0] -match 'Auflistungselement' -and $h[1] -match '^Von Hand: appcmd set config werner') ($h -join ' | ')
+    # schon richtig: nur doAppInitAfterRestart, keine Hinweise
+    $script:site = @('/aufwaermen'); $script:addFails = $false; $script:calls.Clear()
+    Assert-Equal 0 @(Set-SiteAppInit -Site 'werner' -Want '/aufwaermen').Count 'schon richtig'
+    Assert-Equal 1 @(@($script:calls) -match '^set ').Count 'nur doAppInitAfterRestart geschrieben'
+    Remove-Item Function:\Invoke-AppCmd
+    foreach ($x in $h) { Assert ($x -cmatch '^[\x20-\x7E]+$') "nur ASCII: $x" }
+    $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectWarmup' }, $true)
+    Assert ($fn.Extent.Text -match 'Set-SiteAppInit' -and $fn.Extent.Text -notmatch 'Application Initialization konnte nicht eingestellt werden') 'Aufwaerm-Seite bricht den Schritt nicht ab'
 }
 Test-Case 'Kaltstart: OPcache/realpath_cache bewerten, opcache.file_cache muss leer sein' {
     $good = @{ loaded = '1'; 'opcache.enable' = '1'; 'opcache.memory_consumption' = '256'; 'opcache.max_accelerated_files' = '20000'; 'opcache.validate_timestamps' = '1'; 'opcache.revalidate_freq' = '60'; realpath_cache_size = '4096K'; realpath_cache_ttl = '600'; 'opcache.file_cache' = '' }
