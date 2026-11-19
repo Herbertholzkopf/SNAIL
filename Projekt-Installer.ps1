@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.4
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.5
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12.4'
+$script:AppVersion = '7.12.5'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -1242,7 +1242,7 @@ function snail_diff($a, $b, $p = '') { if (is_array($a) && is_array($b)) { $o = 
 # Schluessel, die SNAIL in einer vorhandenen config.php nachtraegt, falls sie
 # fehlen (dazu CONFIG_VERSION eine Stufe hoeher) - eine Liste fuer die PHP-
 # Pruefung und den Hinweis auf "Fertig"
-$script:ConfigAutoKeys = @('app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb')
+$script:ConfigAutoKeys = @('app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb', 'auth.allow_lan_http')
 
 $script:PhpConfigState = ($script:PhpConfigHelpers + @'
 $c = require $argv[1]; $e = require $argv[2];
@@ -1347,7 +1347,7 @@ function Edit-InstalledConfig {
             if (-not $first) { [void]$want.Append(',') }
             $first = $false
             $v = $values[$k]
-            $json = if ($v -is [int]) { [string]$v } else { '"' + ([string]$v).Replace('\', '\\').Replace('"', '\"') + '"' }
+            $json = if ($v -is [bool]) { $(if ($v) { 'true' } else { 'false' }) } elseif ($v -is [int]) { [string]$v } else { '"' + ([string]$v).Replace('\', '\\').Replace('"', '\"') + '"' }
             [void]$want.Append('"' + $k + '":' + $json)
         }
         [void]$want.Append('}')
@@ -1403,6 +1403,11 @@ function Update-InstalledConfigKeys {
     # vorhandener Wert bleibt. Wert aus der config.example.php, sonst 300.
     if ($st.keys.'uploads.audio_max_mb'.example -and [string]$st.keys.'uploads.audio_max_mb'.state -eq 'missing') {
         $values['uploads.audio_max_mb'] = $(if ($st.audio_example) { [int]$st.audio_example } else { $script:AudioMaxMbDefault })
+    }
+    # auth.allow_lan_http (CONFIG_VERSION 7, Vorlage v1.90): nur wenn er fehlt, immer
+    # false (http im eigenen Netz nur zum Testen - das schaltet der Admin von Hand ein)
+    if ($st.keys.'auth.allow_lan_http'.example -and [string]$st.keys.'auth.allow_lan_http'.state -eq 'missing') {
+        $values['auth.allow_lan_http'] = $false
     }
     $allowed = @{}
     # CONFIG_VERSION eine Stufe hoeher (3 -> 4, 5 -> 6), nur wenn danach kein
@@ -3735,7 +3740,11 @@ function Get-ProviderHttpsHint {
     if (-not $it) { return '' }
     $progs = @([regex]::Matches([string]$it.Hint, '([a-z0-9_-]+) \((http://[^)\s]+)\)') | ForEach-Object { '{0} ({1})' -f $_.Groups[1].Value, $_.Groups[2].Value })
     $which = if ($progs.Count -gt 0) { $progs -join ', ' } else { 'des Mandanten' }
-    return ("Reihenfolge beim Umstellen auf https: zuerst die Programme {0} umstellen (app.url auf https, dort Einrichtung wiederholen - das traegt die url in die services.json ein), danach beim DMS Einrichtung wiederholen." -f $which)
+    $txt = ("Reihenfolge beim Umstellen auf https: zuerst die Programme {0} umstellen (app.url auf https, dort Einrichtung wiederholen - das traegt die url in die services.json ein), danach beim DMS Einrichtung wiederholen." -f $which)
+    # Vorlage v1.90: http an private IP-Adressen (nie Hostnamen) nur mit auth.allow_lan_http - fuer Testsysteme
+    $lan = @([regex]::Matches([string]$it.Hint, 'http://(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)[:/]')).Count -gt 0
+    if ($lan) { $txt += ' Nur Testsystem im eigenen Netz: alternativ auth.allow_lan_http => true in der config.php des DMS und der Programme (Vorlage ab v1.90; unverschluesselt, check warnt).' }
+    return $txt
 }
 
 function Get-DmsCheckState {

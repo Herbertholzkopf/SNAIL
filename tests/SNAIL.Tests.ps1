@@ -686,7 +686,7 @@ Test-Case 'Zugangsdatei: app_key mit Hinweis' {
 # =============================================================================
 Write-Host "`n== Audio-Grenze uploads.audio_max_mb (D5, CONFIG_VERSION 6)"
 # Stand 5 (ohne Audio) und 6 (mit), gebaut aus der aktuellen config.example.php
-$exampleV5 = ((($example -split "`n") | Where-Object { $_ -notmatch "^\s*'audio_max_mb' =>" }) -join "`n") -replace "'CONFIG_VERSION' => \d+,", "'CONFIG_VERSION' => 5,"
+$exampleV5 = ((($example -split "`n") | Where-Object { $_ -notmatch "^\s*'(audio_max_mb|allow_lan_http)' =>" }) -join "`n") -replace "'CONFIG_VERSION' => \d+,", "'CONFIG_VERSION' => 5,"
 $exampleV6 = ($exampleV5 -replace "'CONFIG_VERSION' => 5,", "'CONFIG_VERSION' => 6,") -replace "(?m)^(\s*)'max_mb' => (\d+),", "`$1'max_mb' => `$2,`n`$1// Grenze fuer Audiodateien (Transkription)`n`$1'audio_max_mb' => 300,"
 function New-AudioInstall([string]$Name, [string]$Then = $exampleV5, [string]$Now = $exampleV6) {
     $prog = Join-Path $tmp "audio/$Name"
@@ -774,6 +774,34 @@ Test-Case 'Update: vorhandener Wert bleibt; Wert aus der Vorlage; Rueckfall Vorl
     Assert-Equal 0 @($r3.Changed).Count 'Vorlage 5: nichts ergaenzt'
     Assert-Equal ([Convert]::ToBase64String($b3)) ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Join-Path $plan3.ProgDir 'config.php')))) 'unveraendert'
     Assert ($null -eq (Get-ConfigJson $plan3).uploads.audio_max_mb)
+}
+
+Test-Case 'Update 6 -> 7: auth.allow_lan_http ergaenzt (false), CONFIG_VERSION 7; vorhandenes true bleibt' {
+    $exampleV7 = ($exampleV6 -replace "'CONFIG_VERSION' => 6,", "'CONFIG_VERSION' => 7,") -replace "(?m)^(\s*)'dms_url' => '',", "`$1'dms_url' => '',`n`$1'allow_lan_http' => false,"
+    Assert ($exampleV7 -match "'allow_lan_http' => false,") 'Testvorlage 7'
+    if ($example -match "'CONFIG_VERSION' => (\d+),") { Assert ([int]$Matches[1] -ge 7 -or $example -notmatch 'allow_lan_http') "Vorlage im Test: CONFIG_VERSION $($Matches[1])" }
+    $plan = New-AudioInstall 'lan' $exampleV6 $exampleV7
+    $before = Get-ConfigJson $plan
+    $r = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 'auth.allow_lan_http,CONFIG_VERSION' ($r.Changed -join ',') $r.Text
+    $after = Get-ConfigJson $plan
+    Assert ($after.auth.allow_lan_http -is [bool] -and -not $after.auth.allow_lan_http) 'false als Literal'
+    Assert-Equal 7 $after.CONFIG_VERSION
+    foreach ($o in @($before, $after)) { $o.auth.PSObject.Properties.Remove('allow_lan_http'); $o.PSObject.Properties.Remove('CONFIG_VERSION') }
+    Assert-Equal ($before | ConvertTo-Json -Depth 5 -Compress) ($after | ConvertTo-Json -Depth 5 -Compress) 'alle anderen Werte gleich'
+    $r2 = Update-InstalledConfigKeys -Plan $plan
+    Assert-Equal 0 @($r2.Changed).Count 'zweiter Lauf'
+    # Testsystem: von Hand true gesetzt (Schluessel vorhanden) -> bleibt
+    $plan2 = New-AudioInstall 'lan-true' $exampleV7 $exampleV7
+    $f2 = Join-Path $plan2.ProgDir 'config.php'
+    [System.IO.File]::WriteAllText($f2, ([System.IO.File]::ReadAllText($f2) -replace "'allow_lan_http' => false,", "'allow_lan_http' => true,"))
+    $r3 = Update-InstalledConfigKeys -Plan $plan2
+    Assert (@($r3.Changed) -notcontains 'auth.allow_lan_http') ($r3.Changed -join ',')
+    Assert ((Get-ConfigJson $plan2).auth.allow_lan_http -eq $true) 'true bleibt'
+    # Sprung 5 -> 7 in einem Update: beide Schluessel, CONFIG_VERSION bleibt (nur eine Stufe)
+    $plan3 = New-AudioInstall 'lan-5-7' $exampleV5 $exampleV7
+    $r4 = Update-InstalledConfigKeys -Plan $plan3
+    Assert ((@($r4.Changed) -contains 'uploads.audio_max_mb') -and (@($r4.Changed) -contains 'auth.allow_lan_http')) ($r4.Changed -join ',')
 }
 
 # =============================================================================
@@ -1088,11 +1116,11 @@ Test-Case 'Get-FinishAccess: Wiederholen mit DB-Passwort aus der vorhandenen con
 }
 Test-Case 'Hinweis nach Update: aus der Liste ConfigAutoKeys, nennt alle Schluessel und CONFIG_VERSION, nur ASCII; PHP-Pruefung nutzt dieselbe Liste' {
     $n = Get-ConfigAutoKeysNote
-    foreach ($k in @('app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb', 'CONFIG_VERSION')) { Assert ($n.Contains($k)) "fehlt: $k" }
-    Assert ($n -match 'mail.redirect_to und uploads.audio_max_mb') $n
+    foreach ($k in @('app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb', 'auth.allow_lan_http', 'CONFIG_VERSION')) { Assert ($n.Contains($k)) "fehlt: $k" }
+    Assert ($n -match 'uploads.audio_max_mb und auth.allow_lan_http') $n
     Assert ($n -cmatch '^[\x20-\x7E]+$') "nur ASCII: $n"
     Assert (-not $script:PhpConfigState.Contains('__SNAIL_KEYS__')) 'Platzhalter ersetzt'
-    Assert ($script:PhpConfigState.Contains("['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb']")) 'Liste im PHP-Code'
+    Assert ($script:PhpConfigState.Contains("['app.key', 'app.key_previous', 'mail.redirect_to', 'uploads.audio_max_mb', 'auth.allow_lan_http']")) 'Liste im PHP-Code'
 }
 Test-Case 'Windows-Aufgaben (7.11): Auswahl nach Ordner, Warten mit Zeitlimit, Schritte nur bei Aktualisieren/Wiederholen' {
     $names = @('projekt Aufgabenplanung', 'projekt-beispiel Aufgabenplanung', 'projekt Sicherung', 'olaf Aufgabenplanung', 'PROJEKT Nachtlauf', 'projektx Aufgabenplanung')
@@ -1402,6 +1430,11 @@ Test-Case 'check des DMS (7.12.4): Programme ohne https -> Hinweis auf die Reihe
     $h = Get-ProviderHttpsHint -Items $items
     Assert ($h -match 'zuerst die Programme auftragsprogramm \(http://srv-test:21110/\), renate \(http://srv-test:21120/\)' -and $h -match 'danach beim DMS Einrichtung wiederholen') $h
     Assert ($h -cmatch '^[\x20-\x7E]+$') "nur ASCII: $h"
+    Assert ($h -notmatch 'allow_lan_http') 'Hostnamen: kein Hinweis auf allow_lan_http'
+    $lanItems = ConvertFrom-CheckOutput -Lines @(('[FEHLER] Anmeldestelle: Programme nur ' + $ue + 'ber https'), '         Netz: auftragsprogramm (http://10.0.0.126:21110/). In der services.json')
+    $hl = Get-ProviderHttpsHint -Items $lanItems
+    Assert ($hl -match 'auth.allow_lan_http => true' -and $hl -match 'Testsystem') $hl
+    Assert ($hl -cmatch '^[\x20-\x7E]+$') "nur ASCII: $hl"
     Assert-Equal '' (Get-ProviderHttpsHint -Items (ConvertFrom-CheckOutput -Lines @('[FEHLER] Datenbank', ('[  OK  ] Anmeldestelle: Programme nur ' + $ue + 'ber https')))) 'nur bei diesem FEHLER'
     $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
     Assert ($inv -match 'Get-ProviderHttpsHint') 'in der Meldung des Schritts check'

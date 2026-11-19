@@ -33,7 +33,7 @@ Verwendete Installationen (Ports = Vorschläge auf einem frischen Server):
 
 | # | Schritt | Erwartet |
 |---|---|---|
-| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12.4“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Auftragsprogramm (Beschreibung „Aufträge und Baustellen“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
+| 1.1 | SNAIL starten | UAC, Fenster „SNAIL 7.12.5“, Kopf „[ 1 Auswahl ] 2 Angaben 3 Prüfen 4 Installation 5 Fertig“; „Auf diesem Server installiert“ **leer**; Katalog: Projektvorlage, werner (Beschreibung „DMS“), Auftragsprogramm (Beschreibung „Aufträge und Baustellen“), Gertrud, Hildegard, Manfred, Movie-Manager3, Norbert, Olaf, Renate (mit Logos, wo vorhanden). Keine rote Meldung |
 | 1.2 | `icacls C:\ProgramData\SNAIL` | nur Administratoren und SYSTEM `(OI)(CI)(F)`, keine geerbten Einträge |
 | 1.3 | „Projektvorlage“ wählen → „Weiter“ | Seite „Angaben: Projektvorlage neu installieren“; Mandant „(neuer Mandant)“, Schlüssel `standard`, Port **21100** (bzw. erster freier dahinter) mit grünem „frei“, Upload-Grenze 250, Admin `admin`/`Administrator` |
 | 1.4 | Ansehen: Datenordner und Kasten rechts unten | Datenordner `D:\AK\projekt` – **ohne D:** `C:\AKDaten\projekt`; Kasten: „Ordner/Site/Pool: projekt (erste Installation des Dienstes)“, Programm `C:\AK\projekt`, Datenbank `projekt` / Rolle `projekt_user`, Aufgabe `\AK\projekt Aufgabenplanung` |
@@ -165,7 +165,7 @@ Datenbank und Rolle folgen aus dem Ordner (`-` → `_`): Mandant `kol-a` und Man
 | # | Schritt | Erwartet |
 |---|---|---|
 | 10.1 | Je Installation (A, B, C und ggf. abbruch/fehler): `powershell -ExecutionPolicy Bypass -File C:\AK\<Ordner>\tools\windows-pruefung.ps1 -Url http://localhost:<Port>` | jeweils **0 Fehler** (Warnungen notieren) |
-| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.4.0 |
+| 10.2 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\SNAIL\Build-Projekt-Installer.ps1` | `C:\SNAIL\Projekt-Installer.exe`; Eigenschaften → Details: Produkt „SNAIL …“, Version 7.12.5.0 |
 | 10.3 | EXE per Doppelklick, A wiederholen | UAC, Fenster wie 1.1; Lauf ✓, windows-pruefung läuft unter powershell.exe 5.1 |
 
 ## 11 app.key (SNAIL 7.3)
@@ -356,6 +356,8 @@ Braucht werner und ein Programm im Modus dms (wie in 18), beide mit Vorlage **ab
 | 21.9 | In der `config.php` eines Programms `app.url` ändern, **ohne** „Neu einlesen“ das Programm wählen → „Erneut prüfen“ | Protokoll „app.url von <Ordner> frisch gelesen: '<neu>' …“; Prüfen und Lauf nutzen die neue Adresse (services.json-Zeile) |
 | 21.10 | Knopf auf „Prüfen“ | Neuinstallation „Installieren“, vorhandener Ordner „Wiederholen“, ZIP bei vorhandener Installation „Aktualisieren“ |
 | 21.11 | (Befund SRV-Test, Umstellung auf https) werner zuerst auf https umstellen und „Einrichtung wiederholen“, solange ein Programm noch eine http-url in der services.json hat | Schritt check ✗ mit „… Anmeldestelle: Programme nur über https. Reihenfolge beim Umstellen auf https: zuerst die Programme <key> (http://…) umstellen …, danach beim DMS Einrichtung wiederholen.“; nach dieser Reihenfolge grün |
+| 21.12 | (7.12.5, Vorlage ≥ v1.90) Programm mit `CONFIG_VERSION` 6 aktualisieren | Protokoll „Ergänzt: auth.allow_lan_http, CONFIG_VERSION …“; in der `config.php` im Bereich `auth` `'allow_lan_http' => false,` und `CONFIG_VERSION` 7, Sicherung `config.php.vor-snail-*`; ein von Hand gesetztes `true` bleibt beim nächsten Lauf |
+| 21.13 | Testsystem mit `http://10.x…`-Adressen: werner „Einrichtung wiederholen“, solange `allow_lan_http` aus ist | ✗ check mit Reihenfolge-Hinweis und Zusatz „Nur Testsystem im eigenen Netz: alternativ auth.allow_lan_http => true …“ |
 
 ## Ergebnis festhalten
 
