@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.3
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.4
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12.3'
+$script:AppVersion = '7.12.4'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -1913,7 +1913,8 @@ $script:WarmupFallback = '/login'
 function Get-WarmupPath {
     param([string]$ProgDir)
     $routes = if ($ProgDir) { Join-Path (Join-Path $ProgDir 'config') 'routes.php' } else { '' }
-    if ($routes -and (Test-Path -LiteralPath $routes -PathType Leaf) -and ([System.IO.File]::ReadAllText($routes) -match "['""]/aufwaermen['""]")) { return $script:WarmupPath }
+    # Vorlage: 'GET /aufwaermen' => [...] (Methode und Pfad in einem Schluessel; 7.12.3 suchte nur '/aufwaermen')
+    if ($routes -and (Test-Path -LiteralPath $routes -PathType Leaf) -and ([System.IO.File]::ReadAllText($routes) -match "['""](?:GET\s+)?/aufwaermen['""]")) { return $script:WarmupPath }
     return $script:WarmupFallback
 }
 $script:FastCgiWant = @{ IdleTimeout = 3600; InstanceMaxRequests = 10000 }
@@ -3089,6 +3090,18 @@ function ConvertTo-Megabytes {
 #>
 # -ExitCodeChecked: einen Exit-Code ungleich 0 wertet der Aufrufer aus (z. B.
 # user:create bei vorhandenem Benutzer) - dann keine Error-Zeile im Protokoll
+# Protokoll-Stufe einer Konsolenzeile: Zeilen mit [OK]/[WARNUNG]/[FEHLER] nach ihrem
+# Praefix (check), sonst nach dem Exit-Code des Befehls
+function Get-ConsoleLineLevel {
+    param([AllowEmptyString()][string]$Line, [int]$ExitCode, [switch]$ExitCodeChecked)
+    if ($Line -match '^\s*\[\s*OK\s*\]') { return 'Ok' }
+    if ($Line -match '^\s*\[\s*WARNUNG\s*\]') { return 'Warn' }
+    if ($Line -match '^\s*\[\s*FEHLER\s*\]') { return 'Error' }
+    if ($Line -match '^\s*\[\s*INFO\s*\]') { return 'Info' }
+    if ($ExitCode -eq 0 -or $ExitCodeChecked) { return 'Info' }
+    return 'Warn'
+}
+
 function Invoke-Console {
     param([Parameter(Mandatory)]$Plan, [Parameter(Mandatory)][string[]]$Arguments, [int]$TimeoutSec = 600, [switch]$ExitCodeChecked)
     $console = Join-Path (Join-Path $Plan.ProgDir 'bin') 'console'
@@ -3097,7 +3110,7 @@ function Invoke-Console {
     $r = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs (@($console) + $Arguments)) -WorkingDirectory $Plan.ProgDir -Utf8Output -TimeoutSec $TimeoutSec
     foreach ($l in $r.Lines) {
         $shown = if ($l -match 'Passwort:\s*\S') { ($l -replace '(Passwort:\s*).*$', '$1********') } else { $l }
-        Write-Log ('  ' + $shown) $(if ($r.ExitCode -eq 0 -or $ExitCodeChecked) { 'Info' } else { 'Warn' })
+        Write-Log ('  ' + $shown) (Get-ConsoleLineLevel -Line $l -ExitCode $r.ExitCode -ExitCodeChecked:$ExitCodeChecked)
     }
     Write-Log ("Exit-Code {0}" -f $r.ExitCode) $(if ($r.ExitCode -eq 0) { 'Ok' } elseif ($ExitCodeChecked) { 'Info' } else { 'Error' })
     return $r
@@ -3605,6 +3618,87 @@ function ConvertFrom-DmsAccessOutput {
     return [pscustomobject]@{ Given = $given; Existing = $existing; Unknown = $unknown; Lines = $lines }
 }
 
+<#
+ Admins des DMS im Programm zur Rolle admin hochstufen (Vorlage v1.87, docs/03
+ Schritt 3b): php bin\console dms:admins-uebernehmen im Ordner des PROGRAMMS,
+ bei Neuinstallation und "Einrichtung wiederholen" nach dms:programmzugriff.
+ stdout je Zeile mit festem Praefix:
+   [OK] <login> -> admin | [INFO] <login> schon admin |
+   [WARNUNG] <login>: <Grund> (lokales Konto mit dem Namen) |
+   [INFO] nicht im Modus dms ... | [FEHLER] <code>: <Text>
+   (Codes: dms_zu_alt, dms_nicht_erreichbar, niemand_uebernommen, dms_fehler)
+ Exit 0 = erledigt (auch nichts zu tun), 1 = mindestens ein [FEHLER]/[WARNUNG].
+ Programm aelter als v1.87: "Unbekannter Befehl: ..." auf stderr. Nie fatal.
+#>
+function ConvertFrom-DmsAdminsOutput {
+    param([AllowEmptyString()][string]$Output)
+    $admin = @(); $existing = @(); $conflict = @(); $errors = @(); $lines = @(); $notDms = $false
+    foreach ($l in @(([string]$Output) -split "`r?`n")) {
+        $t = $l.TrimStart([char]0xFEFF).Trim()
+        if ($t -eq '') { continue }
+        $lines += $t
+        if ($t -match '^\[OK\]\s+(\S+)\s+->\s+admin\s*$') { $admin += $Matches[1] }
+        elseif ($t -match '^\[INFO\]\s+nicht im Modus dms') { $notDms = $true }
+        elseif ($t -match '^\[INFO\]\s+(\S+)\s+schon admin\s*$') { $existing += $Matches[1] }
+        elseif ($t -match '^\[WARNUNG\]\s+([^:\s]+):\s*(.*)$') { $conflict += [pscustomobject]@{ Login = $Matches[1]; Reason = $Matches[2].Trim() } }
+        elseif ($t -match '^\[FEHLER\]\s+([a-z_]+):\s*(.*)$') { $errors += [pscustomobject]@{ Code = $Matches[1]; Text = $Matches[2].Trim() } }
+        elseif ($t -match '^\[FEHLER\]\s*(.*)$') { $errors += [pscustomobject]@{ Code = ''; Text = $Matches[1].Trim() } }
+    }
+    return [pscustomobject]@{ Admin = $admin; Existing = $existing; Conflict = $conflict; Errors = $errors; NotDms = $notDms; Lines = $lines }
+}
+
+# Ergebnis von dms:admins-uebernehmen bewerten (ohne Aufruf, fuer die Tests).
+# Kind: ok | notdms | conflict | unknown (Programm kennt den Befehl nicht) | tooold (werner aelter als v1.87) | error
+function Get-DmsAdminsResult {
+    param([int]$ExitCode, [AllowEmptyString()][string]$Output = '', [AllowEmptyString()][string]$ErrorText = '')
+    $p = ConvertFrom-DmsAdminsOutput -Output $Output
+    $err = @(([string]$ErrorText) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    $n = $p.Admin.Count + $p.Existing.Count
+    $sum = ("{0} uebernommen ({1} neu admin, {2} bestand)" -f $n, $p.Admin.Count, $p.Existing.Count)
+    $res = [pscustomobject]@{ Ok = $false; Kind = 'error'; Admin = $p.Admin; Existing = $p.Existing; Conflict = $p.Conflict; Errors = $p.Errors; Lines = $p.Lines; Text = '' }
+    if (@($err | Where-Object { $_ -match '^Unbekannter Befehl:' }).Count -gt 0) {
+        $res.Kind = 'unknown'
+        $res.Text = 'Admins aus werner nicht uebernommen: das Programm kennt dms:admins-uebernehmen noch nicht (Vorlage aelter als v1.87) - Programm aktualisieren, dann Einrichtung wiederholen; bis dahin die Rolle admin im Programm von Hand setzen.'
+    } elseif (@($p.Errors | Where-Object { $_.Code -eq 'dms_zu_alt' }).Count -gt 0) {
+        $res.Kind = 'tooold'
+        $res.Text = 'Admins aus werner nicht uebernommen: werner ist aelter als Vorlage v1.87 (liefert die Angabe admin nicht) - werner zuerst aktualisieren, dann bei diesem Programm Einrichtung wiederholen.'
+    } elseif ($p.Errors.Count -gt 0) {
+        $e = $p.Errors[0]
+        $res.Text = ("Admins aus werner nicht uebernommen: {0}{1} - Rolle admin im Programm von Hand setzen oder nach Behebung Einrichtung wiederholen ({2})." -f $(if ($e.Code) { $e.Code + ': ' } else { '' }), $e.Text, $sum)
+    } elseif ($p.Conflict.Count -gt 0) {
+        $res.Kind = 'conflict'
+        $res.Text = ("Admins aus werner: Konflikt bei {0} - im Programm gibt es ein lokales Konto mit diesem Namen, nicht mit werner verknuepft; dort unter System -> Benutzer klaeren ({1})." -f (($p.Conflict | ForEach-Object { $_.Login }) -join ', '), $sum)
+    } elseif ($ExitCode -eq 0 -and $p.NotDms) {
+        $res.Ok = $true; $res.Kind = 'notdms'
+        $res.Text = 'Admins aus werner: Programm nicht im Modus dms - nichts zu tun.'
+    } elseif ($ExitCode -eq 0) {
+        $res.Ok = $true; $res.Kind = 'ok'
+        $res.Text = "Admins aus werner: $sum."
+    } else {
+        $last = if ($err.Count -gt 0) { $err[-1] } else { "Exit-Code $ExitCode" }
+        $res.Text = ("Admins aus werner nicht uebernommen: {0} - Rolle admin im Programm von Hand setzen oder nach Behebung Einrichtung wiederholen." -f $last)
+    }
+    $res.Text = Hide-ProgramToken -Text $res.Text
+    return $res
+}
+
+function Invoke-DmsAdminsAdopt {
+    param([Parameter(Mandatory)]$Plan)
+    $console = Join-Path (Join-Path $Plan.ProgDir 'bin') 'console'
+    if (-not (Test-Path -LiteralPath $console)) { return (Get-DmsAdminsResult -ExitCode 1 -ErrorText "Konsole des Programms nicht gefunden: $console") }
+    Write-Log 'php bin\console dms:admins-uebernehmen (im Programmordner)'
+    try {
+        $r = Invoke-ExeCapture -FilePath $Plan.PhpExe -ArgumentList (ConvertTo-CmdArgs @($console, 'dms:admins-uebernehmen')) -WorkingDirectory $Plan.ProgDir -Utf8Output -TimeoutSec 120
+    } catch {
+        return (Get-DmsAdminsResult -ExitCode 1 -ErrorText ('dms:admins-uebernehmen: ' + $_.Exception.Message))
+    }
+    $res = Get-DmsAdminsResult -ExitCode $r.ExitCode -Output ([string]$r.Output) -ErrorText ([string]$r.Error)
+    if ($res.Kind -ne 'unknown') { foreach ($l in $res.Lines) { Write-Log ('  ' + (Hide-ProgramToken -Text $l)) } }
+    foreach ($l in @(([string]$r.Error) -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -First 5)) { Write-Log ('  ' + (Hide-ProgramToken -Text $l.Trim())) $(if ($r.ExitCode -eq 0) { 'Info' } else { 'Warn' }) }
+    Write-Log $res.Text $(if ($res.Ok) { 'Ok' } else { 'Warn' })
+    return $res
+}
+
 # Token-artige Teile einer Zeile unkenntlich machen (fuer Protokoll und Meldungen)
 function Hide-ProgramToken {
     param([AllowEmptyString()][string]$Text)
@@ -3629,6 +3723,21 @@ function Select-ProgramTokenLine {
 }
 
 # Zeile "Anmeldung ueber das DMS (...)" aus der Ausgabe von check bewerten
+<#
+ check des DMS (auth.mode provider) prueft die url aller Programme des Mandanten
+ in der services.json: ohne https -> [FEHLER] "Anmeldestelle: Programme nur
+ ueber https". Beim Umstellen auf https zuerst die Programme, dann das DMS.
+ Liefert den Hinweis fuer die Fehlermeldung oder ''.
+#>
+function Get-ProviderHttpsHint {
+    param($Items = @())
+    $it = @($Items | Where-Object { $_.Status -eq 'FEHLER' -and $_.Label -match '^Anmeldestelle: Programme nur' }) | Select-Object -First 1
+    if (-not $it) { return '' }
+    $progs = @([regex]::Matches([string]$it.Hint, '([a-z0-9_-]+) \((http://[^)\s]+)\)') | ForEach-Object { '{0} ({1})' -f $_.Groups[1].Value, $_.Groups[2].Value })
+    $which = if ($progs.Count -gt 0) { $progs -join ', ' } else { 'des Mandanten' }
+    return ("Reihenfolge beim Umstellen auf https: zuerst die Programme {0} umstellen (app.url auf https, dort Einrichtung wiederholen - das traegt die url in die services.json ein), danach beim DMS Einrichtung wiederholen." -f $which)
+}
+
 function Get-DmsCheckState {
     param($Items = @())
     $it = @($Items | Where-Object { $_.Label -match '^Anmeldung .ber das DMS' }) | Select-Object -First 1
@@ -3831,12 +3940,13 @@ function Get-ServicesEntry {
  Katalog (fehlt er dort, gilt der Name aus services.json bzw. app.name).
 #>
 function Get-InstalledInstances {
-    param([Parameter(Mandatory)][string]$ProgRoot, [string]$PhpExe, $Catalog = @{}, $Sites = @(), [string]$ServicesJson = '', [string]$CredDir = '')
+    param([Parameter(Mandatory)][string]$ProgRoot, [string]$PhpExe, $Catalog = @{}, $Sites = @(), [string]$ServicesJson = '', [string]$CredDir = '', [string]$Only = '')
     $list = New-Object System.Collections.Generic.List[object]
     if (-not (Test-Path -LiteralPath $ProgRoot)) { return @() }
     $tree = $null
     if ($ServicesJson) { try { $tree = Read-ServicesJson -Path $ServicesJson } catch { $tree = $null } }
     foreach ($d in @(Get-ChildItem -LiteralPath $ProgRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        if ($Only -and $d.Name -ne $Only) { continue }
         $console = Join-Path (Join-Path $d.FullName 'bin') 'console'
         if (-not (Test-Path -LiteralPath (Join-Path $d.FullName 'config.php')) -or -not (Test-Path -LiteralPath $console)) { continue }
         $inst = [pscustomobject]@{
@@ -4292,7 +4402,12 @@ function Test-Installation {
             if ($pw) { & $add $pw.Level 'Kaltstart' $pw.Text }
         } catch { }
         if (-not (Test-AppInitInstalled)) { & $add 'Warn' 'Kaltstart' 'IIS-Feature Application Initialization fehlt - die erste Seite nach einem Neustart bleibt langsam (Feature IIS-ApplicationInit) - WIPP (ab 1.11.4) erneut laufen lassen.' }
-        else { & $add 'Ok' 'Kaltstart' ("Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber {0} (Vorlage ab 1.64, sonst {1})." -f $script:WarmupPath, $script:WarmupFallback) }
+        else {
+            $wp = if ($plan.ProgDir -and (Test-Path -LiteralPath (Join-Path (Join-Path $plan.ProgDir 'bin') 'console'))) { Get-WarmupPath -ProgDir $plan.ProgDir } else { '' }
+            $txt = if ($wp) { "Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber $wp (aus config\routes.php des Programms; ein neuer Programmstand kann das beim Aktualisieren aendern)." }
+                   else { "Application Initialization vorhanden - Aufwaermen nach jedem Start des App-Pools ueber $($script:WarmupPath) (Vorlage ab 1.64, sonst $($script:WarmupFallback))." }
+            & $add 'Ok' 'Kaltstart' $txt
+        }
     }
     if ($php) {
         try {
@@ -4552,6 +4667,7 @@ function Invoke-Installation {
         AppKey = [pscustomobject]@{ Status = ''; Key = ''; Changed = @(); Backup = ''; Text = '' }
         DmsToken = [pscustomobject]@{ Status = ''; Value = ''; Generated = $false; Backup = ''; Text = '' }
         DmsAccess = $null
+        DmsAdmins = $null
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $steps = Get-StepPlan -Plan $Plan
@@ -4717,6 +4833,15 @@ function Invoke-Installation {
                         } else {
                             Write-Log 'Programmzugriff im DMS: unveraendert (Token behalten - die Zugriffe verwaltet der Admin im DMS).'
                         }
+                        # Admins des DMS im Programm zur Rolle admin hochstufen (Neuinstallation und Wiederholen, 7.12.4)
+                        if ($Plan.Mode -ne 'update') {
+                            $ad = Invoke-DmsAdminsAdopt -Plan $Plan
+                            $script:Result.DmsAdmins = $ad
+                            if (-not $ad.Ok) {
+                                $rows.Add(@{ Level = 'Warn'; Name = 'Admins aus werner'; Text = $ad.Text })
+                                if ($state -eq 'Done') { $state = 'Warn' }
+                            }
+                        }
                     }
                     'migrate' {
                         $m = Invoke-ConsoleMigrate -Plan $Plan
@@ -4763,7 +4888,8 @@ function Invoke-Installation {
                         }
                         if (-not $c.Ok) {
                             $fehler = @($c.Items | Where-Object { $_.Status -eq 'FEHLER' } | ForEach-Object { $_.Label })
-                            throw ("Die Selbstprüfung meldet Fehler (Exit-Code {0}): {1}. Erneut prüfen: php bin\console check" -f $c.ExitCode, $(if ($fehler.Count -gt 0) { $fehler -join '; ' } else { 'siehe Protokoll' }))
+                            $httpsHint = Get-ProviderHttpsHint -Items $c.Items
+                            throw ("Die Selbstpruefung meldet Fehler (Exit-Code {0}): {1}. {2}Erneut pruefen: php bin\console check" -f $c.ExitCode, $(if ($fehler.Count -gt 0) { $fehler -join '; ' } else { 'siehe Protokoll' }), $(if ($httpsHint) { $httpsHint + ' ' } else { '' }))
                         }
                         Write-Log $(if ($c.Summary) { $c.Summary } else { 'Selbstprüfung ohne Fehler.' }) 'Ok'
                         if ($dmsState) {
@@ -5418,7 +5544,32 @@ function Initialize-CheckInputs {
     }
 }
 
+# Vorhandene Installation vor dem Pruefen frisch lesen (info, Binding, services.json) -
+# eine seit "Neu einlesen" geaenderte app.url o. Ae. gilt sonst erst nach dem naechsten Einlesen
+function Update-InstalledTarget {
+    $t = $script:Target
+    if (-not $t -or $t.Kind -ne 'installed') { return }
+    try {
+        $sites = if (Test-Path -LiteralPath $script:AppCmd) { @(Get-IisSites) } else { @() }
+        $x = @(Get-InstalledInstances -ProgRoot $script:Settings.ProgRoot -PhpExe (Find-PhpExe) -Catalog $script:Services `
+            -Sites $sites -ServicesJson (Join-Path $script:Settings.ProgRoot 'services.json') -CredDir $script:CredDir -Only $t.Ordner) | Select-Object -First 1
+        if (-not $x -or $x.Error) { return }
+        if ($x.Url -ne $t.Url) { Write-Log ("app.url von {0} frisch gelesen: '{1}' (vorher '{2}')." -f $x.Ordner, $x.Url, $t.Url) }
+        $script:Instances = @($script:Instances | ForEach-Object { if ($_.Ordner -eq $x.Ordner) { $x } else { $_ } })
+        $script:Target = ConvertTo-InstallTarget -Instance $x
+    } catch {
+        Write-Log ("Installation {0} nicht frisch gelesen: {1}" -f $t.Ordner, $_.Exception.Message) 'Warn'
+    }
+}
+
+# Beschriftung des Ausfuehren-Knopfs je Modus
+function Get-RunVerb {
+    param([string]$Mode)
+    switch ($Mode) { 'update' { return 'Aktualisieren' } 'repeat' { return 'Wiederholen' } default { return 'Installieren' } }
+}
+
 function Invoke-CheckPage {
+    Update-InstalledTarget
     $t = $script:Target
     $script:LblCheckHead.Text = "Prüfen: $($t.Display)"
     $script:LvCheck.BeginUpdate()
@@ -5449,7 +5600,7 @@ function Invoke-CheckPage {
     if ($adopt) { $script:ChkAdoptDb.Text = $res.Plan.DbAdoptText }
     $script:GrpAdopt.Visible = $adopt
     if ($res.Plan) { $script:RbExisting.Text = "Vorhandenen Programmordner nutzen: $($res.Plan.ProgDir)" + $(if ($t.Kind -eq 'installed') { ' (= Einrichtung wiederholen; ZIP = Aktualisieren)' } else { '' }) }
-    $verb = if ($isUpdate) { 'Aktualisieren' } else { 'Installieren' }
+    $verb = Get-RunVerb -Mode $(if ($res.Plan) { $res.Plan.Mode } else { '' })
     $script:LblCheckHint.Text = if ($res.Ok -and $adopt) {
         'Datenbank bzw. Rolle gibt es schon (gelb markiert). "Installieren" erst nach dem Häkchen "übernehmen" - die alten Daten bleiben dann erhalten.'
     } elseif ($res.Ok) {
@@ -5652,6 +5803,10 @@ function Get-FinishAccess {
         $da = $r.DmsAccess
         $lines.Add($(if ($da.Ok) { ("Zugriff DMS: Programmzugriff im DMS: {0} Admin(s)" -f (@($da.Given).Count + @($da.Existing).Count)) } else { 'Zugriff DMS: nicht vollstaendig gesetzt - siehe Hinweise unten' }))
     }
+    if ($r.DmsAdmins) {
+        $dd = $r.DmsAdmins
+        $lines.Add($(if ($dd.Kind -eq 'notdms') { 'Admins DMS : nicht im Modus dms - nichts zu tun' } elseif ($dd.Ok) { ("Admins DMS : {0} uebernommen ({1} neu admin, {2} bestand)" -f (@($dd.Admin).Count + @($dd.Existing).Count), @($dd.Admin).Count, @($dd.Existing).Count) } else { 'Admins DMS : nicht (vollstaendig) uebernommen - siehe Hinweise unten' }))
+    }
     if ($ak.Key -and @('new', 'added', 'manual') -contains $ak.Status) {
         $secrets.Add([pscustomobject]@{ Label = $(if ($ak.Status -eq 'manual') { 'app.key (Vorschlag)' } else { 'app.key' }); Value = [string]$ak.Key })
     }
@@ -5830,7 +5985,7 @@ function Update-NextState {
             $isUpdate = ($script:Plan -and $script:Plan.Mode -eq 'update')
             $backupOk = (-not $isUpdate) -or (-not $script:ChkSkipBackup.Checked) -or $script:ChkBackupOk.Checked
             $adoptOk = (-not ($script:Plan -and $script:Plan.DbAdoptNeeded)) -or $script:ChkAdoptDb.Checked
-            $script:BtnNext.Text    = if ($isUpdate) { 'Aktualisieren' } else { 'Installieren' }
+            $script:BtnNext.Text    = Get-RunVerb -Mode $(if ($script:Plan) { $script:Plan.Mode } else { '' })
             $script:BtnNext.Enabled = [bool]$script:CheckOk -and $backupOk -and $adoptOk -and -not $script:Busy
             $script:BtnBack.Enabled = -not $script:Busy
         }

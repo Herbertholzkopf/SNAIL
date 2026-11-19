@@ -982,6 +982,9 @@ Test-Case 'Get-InstalledInstances: zwei Mandanten, BOM, ohne config.php / bin\co
     Assert-Equal 'muster' $a.Key; Assert-Equal 'Muster GmbH' $a.Name 'Name aus services.json'; Assert-Equal 21100 $a.Port
     Assert-Equal 'projekt' $a.Db.Name 'db aus info'; Assert-Equal 'https://muster.test/' $a.Url
     Assert-Equal 'http://alt/' $a.ServicesUrl
+    $one = @(Get-InstalledInstances -ProgRoot $ak -PhpExe $PhpExe -Catalog $catalog.Services -Sites $sites -ServicesJson $sjf -Only 'projekt')
+    Assert-Equal 'projekt' (($one | ForEach-Object Ordner) -join ',') '-Only: nur dieser Ordner (Erneut pruefen liest frisch)'
+    Assert-Equal 'https://muster.test/' $one[0].Url
     Assert-Equal 'beispiel' $b.Key; Assert-Equal 'beispiel' $b.Name 'nicht in services.json -> Schluessel'; Assert-Equal 21101 $b.Port 'Site-Name ohne Gross/Klein'
     Assert-Equal 'Projektvorlage - Muster GmbH' $a.Display
     Assert-Equal 'olaf' $o.Db.Name 'Fallback ohne db in info'
@@ -1248,8 +1251,15 @@ Test-Case 'Kaltstart: Recycling-Zeitpunkt je Programm stabil 03:MM, Zeitplan und
     Assert-Equal 1 @(Get-AppInitEditArgs -Site 'werner' -Current @('/login') -Want '/login').Count 'schon richtig: nur doAppInitAfterRestart'
     $wp = Join-Path $tmp 'warm'; New-Item -ItemType Directory -Path (Join-Path $wp 'config') -Force | Out-Null
     Assert-Equal '/login' (Get-WarmupPath -ProgDir $wp) 'ohne routes.php: Rueckfall'
-    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/login', 'x', Router::PUBLIC);")
+    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`nreturn [`n    'GET /login' => [AuthController::class, 'showLogin', Router::PUBLIC],`n    'GET /aufwaermen-alt' => [X::class, 'y', Router::PUBLIC],`n];")
     Assert-Equal '/login' (Get-WarmupPath -ProgDir $wp) 'Vorlage vor 1.64'
+    # echtes Format der Vorlage (Befund SRV-Test 18.11.: 7.12.3 fand es nicht)
+    [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`nreturn [`n    'GET /aufwaermen' => [ConnectionController::class, 'warmUp', Router::NO_SESSION],`n];")
+    Assert-Equal '/aufwaermen' (Get-WarmupPath -ProgDir $wp) "'GET /aufwaermen' => ..."
+    if (Test-Path -LiteralPath (Join-Path $Vorlage 'config/routes.php')) {
+        $hasRoute = ([System.IO.File]::ReadAllText((Join-Path $Vorlage 'config/routes.php'))).Contains("'GET /aufwaermen'")
+        Assert-Equal $(if ($hasRoute) { '/aufwaermen' } else { '/login' }) (Get-WarmupPath -ProgDir $Vorlage) 'routes.php der Vorlage'
+    }
     [System.IO.File]::WriteAllText((Join-Path $wp 'config/routes.php'), "<?php`n`$r->get('/aufwaermen', [WarmUpController::class, 'show'], Router::NO_SESSION);")
     Assert-Equal '/aufwaermen' (Get-WarmupPath -ProgDir $wp) 'Vorlage ab 1.64'
     Assert-Equal '/login' (Get-WarmupPath -ProgDir '') 'kein Programmordner'
@@ -1381,6 +1391,38 @@ Test-Case 'Kaltstart 7.12.2: Aufwaerm-Seite nur an der Website aendern, geerbte 
     $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-ProjectWarmup' }, $true)
     Assert ($fn.Extent.Text -match 'Set-SiteAppInit' -and $fn.Extent.Text -notmatch 'Application Initialization konnte nicht eingestellt werden') 'Aufwaerm-Seite bricht den Schritt nicht ab'
 }
+Test-Case 'check des DMS (7.12.4): Programme ohne https -> Hinweis auf die Reihenfolge' {
+    $ue = [string][char]0xFC
+    $lines = @(
+        ('[  OK  ] Anmeldung: eigene Benutzer, Anmeldestelle f' + $ue + 'r die Programme (DMS) (auth.mode = provider)'),
+        ('[FEHLER] Anmeldestelle: Programme nur ' + $ue + 'ber https'),
+        ('         Einmal-Codes und Sitzungen gingen unverschl' + $ue + 'sselt ' + $ue + 'ber das Netz: auftragsprogramm (http://srv-test:21110/), renate (http://srv-test:21120/). In der services.json https-Adressen eintragen (Cloudflare Tunnel oder Zertifikat).')
+    )
+    $items = ConvertFrom-CheckOutput -Lines $lines
+    $h = Get-ProviderHttpsHint -Items $items
+    Assert ($h -match 'zuerst die Programme auftragsprogramm \(http://srv-test:21110/\), renate \(http://srv-test:21120/\)' -and $h -match 'danach beim DMS Einrichtung wiederholen') $h
+    Assert ($h -cmatch '^[\x20-\x7E]+$') "nur ASCII: $h"
+    Assert-Equal '' (Get-ProviderHttpsHint -Items (ConvertFrom-CheckOutput -Lines @('[FEHLER] Datenbank', ('[  OK  ] Anmeldestelle: Programme nur ' + $ue + 'ber https')))) 'nur bei diesem FEHLER'
+    $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
+    Assert ($inv -match 'Get-ProviderHttpsHint') 'in der Meldung des Schritts check'
+}
+Test-Case 'Protokoll (7.12.4): Stufe je Konsolenzeile nach Praefix, sonst nach Exit-Code' {
+    Assert-Equal 'Ok' (Get-ConsoleLineLevel -Line '[  OK  ] Datenbank' -ExitCode 1)
+    Assert-Equal 'Warn' (Get-ConsoleLineLevel -Line '[WARNUNG] Mail' -ExitCode 0)
+    Assert-Equal 'Error' (Get-ConsoleLineLevel -Line '[FEHLER] Anmeldestelle' -ExitCode 1)
+    Assert-Equal 'Info' (Get-ConsoleLineLevel -Line '[ INFO ] x' -ExitCode 1)
+    Assert-Equal 'Warn' (Get-ConsoleLineLevel -Line '         Hinweiszeile' -ExitCode 1)
+    Assert-Equal 'Info' (Get-ConsoleLineLevel -Line 'Ergebnis: 1 Fehler' -ExitCode 1 -ExitCodeChecked)
+    Assert-Equal 'Info' (Get-ConsoleLineLevel -Line 'alles gut' -ExitCode 0)
+}
+Test-Case 'Pruefen (7.12.4): Knopf je Modus, vorhandene Installation vor dem Pruefen frisch lesen' {
+    Assert-Equal 'Installieren' (Get-RunVerb -Mode 'install')
+    Assert-Equal 'Wiederholen' (Get-RunVerb -Mode 'repeat')
+    Assert-Equal 'Aktualisieren' (Get-RunVerb -Mode 'update')
+    Assert-Equal 'Installieren' (Get-RunVerb -Mode '')
+    $cp = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-CheckPage' }, $true).Extent.Text
+    Assert ($cp.IndexOf('Update-InstalledTarget') -ge 0 -and $cp.IndexOf('Update-InstalledTarget') -lt $cp.IndexOf('Test-Installation')) 'frisch lesen vor Test-Installation'
+}
 Test-Case 'Kaltstart: OPcache/realpath_cache bewerten, opcache.file_cache muss leer sein' {
     $good = @{ loaded = '1'; 'opcache.enable' = '1'; 'opcache.memory_consumption' = '256'; 'opcache.max_accelerated_files' = '20000'; 'opcache.validate_timestamps' = '1'; 'opcache.revalidate_freq' = '60'; realpath_cache_size = '4096K'; realpath_cache_ttl = '600'; 'opcache.file_cache' = '' }
     Assert-Equal 0 @(Get-OpcacheWarnings -Values $good).Count 'alles wie gewuenscht'
@@ -1505,6 +1547,54 @@ Test-Case 'dms:programmzugriff: Ausgabe zerlegen (gegeben, bestand, unbekannt, B
     Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'Programmzugriff im DMS: 2 Admin\(s\)') 'Fertig'
     $res.DmsAccess = [pscustomobject]@{ Ok = $false; Given = @(); Existing = @(); Unknown = @(); Text = 'x' }
     Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'nicht vollstaendig') 'Fertig bei Fehler'
+}
+Test-Case 'dms:admins-uebernehmen (7.12.4): Ausgabe zerlegen und bewerten (Codes, nicht Texte), nie fatal' {
+    $ae = [string][char]0xE4
+    $p = ConvertFrom-DmsAdminsOutput -Output ([string][char]0xFEFF + "[OK] chefin -> admin`r`n[INFO] admin schon admin`n[WARNUNG] max: lokales Konto tr${ae}gt den Namen`n[FEHLER] dms_fehler: kaputt`n`n")
+    Assert-Equal 'chefin' ($p.Admin -join ','); Assert-Equal 'admin' ($p.Existing -join ','); Assert-Equal 'max' (($p.Conflict | ForEach-Object { $_.Login }) -join ',')
+    Assert-Equal 'dms_fehler' $p.Errors[0].Code; Assert (-not $p.NotDms) 'dms'
+    $ok = Get-DmsAdminsResult -ExitCode 0 -Output "[OK] chefin -> admin`n[INFO] admin schon admin`n"
+    Assert ($ok.Ok -and $ok.Kind -eq 'ok' -and $ok.Text -match '2 uebernommen \(1 neu admin, 1 bestand\)') $ok.Text
+    $nd = Get-DmsAdminsResult -ExitCode 0 -Output ("[INFO] nicht im Modus dms " + [char]0x2014 + " nichts zu tun`n")
+    Assert ($nd.Ok -and $nd.Kind -eq 'notdms') $nd.Text
+    $c = Get-DmsAdminsResult -ExitCode 1 -Output "[OK] chefin -> admin`n[WARNUNG] max: lokales Konto tr${ae}gt den Namen`n"
+    Assert (-not $c.Ok -and $c.Kind -eq 'conflict' -and $c.Text -match 'Konflikt bei max' -and $c.Text -match '1 uebernommen') $c.Text
+    $u = Get-DmsAdminsResult -ExitCode 1 -Output "Verf${ae}gbare Befehle:`n  check  ..." -ErrorText "Unbekannter Befehl: dms:admins-uebernehmen`n"
+    Assert ($u.Kind -eq 'unknown' -and $u.Text -match 'aelter als v1\.87' -and $u.Text -match 'Programm aktualisieren') $u.Text
+    $o = Get-DmsAdminsResult -ExitCode 1 -Output "[FEHLER] dms_zu_alt: Das DMS liefert keine Angabe admin`n"
+    Assert ($o.Kind -eq 'tooold' -and $o.Text -match 'werner zuerst aktualisieren, dann bei diesem Programm Einrichtung wiederholen') $o.Text
+    $e = Get-DmsAdminsResult -ExitCode 1 -Output "[FEHLER] dms_nicht_erreichbar: Das DMS ist nicht erreichbar: Zeitueberschreitung`n"
+    Assert ($e.Kind -eq 'error' -and $e.Text -match 'dms_nicht_erreichbar: Das DMS ist nicht erreichbar' -and $e.Text -match 'von Hand') $e.Text
+    $nn = Get-DmsAdminsResult -ExitCode 1 -Output "[FEHLER] niemand_uebernommen: Niemand uebernommen: keine aktiven Admins`n"
+    Assert ($nn.Kind -eq 'error' -and $nn.Text -match 'niemand_uebernommen') $nn.Text
+    $s2 = Get-DmsAdminsResult -ExitCode 255 -ErrorText "PHP Fatal error: x`nletzte Zeile"
+    Assert ($s2.Kind -eq 'error' -and $s2.Text -match 'letzte Zeile') "ohne [FEHLER]: letzte stderr-Zeile: $($s2.Text)"
+    $t = Get-DmsAdminsResult -ExitCode 1 -Output ('[FEHLER] dms_fehler: pt1_' + ('A' * 40))
+    Assert ($t.Text -notmatch 'pt1_A') 'kein Token in der Meldung'
+    foreach ($x in @($ok, $nd, $c, $u, $o)) { Assert ($x.Text -cmatch '^[\x20-\x7E]+$') "nur ASCII: $($x.Text)" }
+    # Aufruf mit nachgebildeter Konsole (echtes php)
+    $pd = Join-Path $tmp 'admins-prog'; New-Item -ItemType Directory -Path (Join-Path $pd 'bin') -Force | Out-Null
+    $plan = [pscustomobject]@{ ProgDir = $pd; PhpExe = $PhpExe }
+    [System.IO.File]::WriteAllText((Join-Path $pd 'bin/console'), "<?php`nif ((`$argv[1] ?? '') !== 'dms:admins-uebernehmen') { fwrite(STDERR, 'falsch'); exit(2); }`necho `"[OK] chefin -> admin\n[INFO] admin schon admin\n`"; exit(0);`n")
+    $r = Invoke-DmsAdminsAdopt -Plan $plan
+    Assert ($r.Ok -and @($r.Admin).Count -eq 1 -and @($r.Existing).Count -eq 1) $r.Text
+    [System.IO.File]::WriteAllText((Join-Path $pd 'bin/console'), "<?php`nfwrite(STDERR, `"Unbekannter Befehl: {`$argv[1]}\n\n`"); echo `"Verfuegbare Befehle:\n`"; exit(1);`n")
+    $r = Invoke-DmsAdminsAdopt -Plan $plan
+    Assert ($r.Kind -eq 'unknown') $r.Text
+    $r = Invoke-DmsAdminsAdopt -Plan ([pscustomobject]@{ ProgDir = (Join-Path $tmp 'gibtsnicht'); PhpExe = $PhpExe })
+    Assert (-not $r.Ok -and $r.Text -match 'Konsole des Programms nicht gefunden') $r.Text
+    # Fertig
+    $res = New-TestResult
+    $res.DmsAdmins = $ok
+    Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'Admins DMS : 2 uebernommen \(1 neu admin, 1 bestand\)') 'Fertig'
+    $res.DmsAdmins = $o
+    Assert (((Get-FinishAccess -Result $res).Lines -join "`n") -match 'Admins DMS : nicht') 'Fertig bei Hinweis'
+    # Skript: nur bei Neuinstallation/Wiederholen, im Schritt dmstoken, nach dms:programmzugriff, nicht fatal
+    $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
+    $iG = $inv.IndexOf('Grant-DmsProgramAccess'); $iA = $inv.IndexOf('Invoke-DmsAdminsAdopt')
+    Assert ($iG -gt 0 -and $iA -gt $iG) 'nach dms:programmzugriff'
+    Assert ($inv.Substring([Math]::Max(0, $iA - 200), 200) -match "Mode -ne 'update'") 'nicht beim Aktualisieren'
+    Assert ($inv.Substring($iA, 400) -notmatch 'throw') 'kein Abbruch'
 }
 Test-Case 'Skript: dms:programmzugriff nur nach einem neu ausgestellten Token (nicht beim behaltenen)' {
     $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Grant-DmsProgramAccess' }, $true))
