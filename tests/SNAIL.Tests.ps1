@@ -1547,6 +1547,23 @@ function New-A5Target([string]$SvcKey, [string]$Key, $Instance = $null) {
     $s = if ($catalog.Services.ContainsKey($SvcKey)) { $catalog.Services[$SvcKey] } else { New-PseudoService -Key $SvcKey }
     [pscustomobject]@{ Kind = $(if ($Instance) { 'installed' } else { 'new' }); Service = $s; Key = $Key; Ordner = $(if ($Instance) { $Instance.Ordner } else { "$SvcKey-$Key" }); Instance = $Instance }
 }
+Test-Case 'Notfallkonto (7.12.7): im Modus dms legt SNAIL immer notfall an - auch beim Wiederholen mit neuer Datenbank' {
+    Assert-Equal 'notfall' (Get-AdminLogin -Role 'dms' -Login 'admin') 'dms, Wiederholen (Login aus ConvertTo-InstallTarget = admin)'
+    Assert-Equal 'notfall' (Get-AdminLogin -Role 'dms' -Login 'notfall')
+    Assert-Equal 'admin' (Get-AdminLogin -Role 'local' -Login 'admin') 'lokal unveraendert'
+    Assert-Equal 'chef' (Get-AdminLogin -Role 'provider' -Login 'chef') 'DMS selbst: Eingabe bleibt'
+    $t = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-Installation' }, $true).Extent.Text
+    $i = $t.IndexOf('Get-AdminLogin')
+    Assert ($i -gt 0) 'Test-Installation nutzt Get-AdminLogin'
+    $guard = $t.Substring(0, $i).Substring([Math]::Max(0, $i - 700))
+    Assert ($guard -notmatch "if \(\`$dp\.Role -eq 'dms' -and \`$isNew") 'nicht mehr nur bei Neuinstallation'
+    Assert ($t -match "Datenbank wird neu angelegt - SNAIL legt das lokale Konto") 'Hinweis auf Pruefen beim Wiederholen mit neuer Datenbank'
+    $tgt = ConvertTo-InstallTarget -Instance ([pscustomobject]@{ Service = $null; Key = 'w3'; Name = 'W3'; Display = 'x'; Port = 21110; Url = 'http://x/'; UploadsMaxMb = 25; Ordner = 'auftragsprogramm'; Paths = $null; Db = $null })
+    Assert-Equal 'admin' $tgt.Admin.Login 'vorhandener Ordner startet mit admin - wird im Modus dms zu notfall'
+    # Schritt admin legt nur bei 0 Konten an (vorhandene Konten werden nie umbenannt)
+    $inv = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Installation' }, $true).Extent.Text
+    Assert ($inv -match "if \(\`$count -gt 0\) \{\s*Write-Log `"\`$count Benutzerkonto") 'kein neues Konto, wenn es Konten gibt'
+}
 Test-Case 'Get-DmsPlan: DMS = provider; Programm mit DMS im Mandanten = dms; ohne DMS lokal mit Hinweis; Wiederholen behaelt die Rolle' {
     $p = Get-DmsPlan -Target (New-A5Target 'werner' 'neu') -Instances $a5Inst -Catalog $catalog.ServiceList
     Assert-Equal 'provider' $p.Role 'DMS aus dem Katalog'
