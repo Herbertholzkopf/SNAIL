@@ -1448,6 +1448,24 @@ Test-Case 'Protokoll (7.12.4): Stufe je Konsolenzeile nach Praefix, sonst nach E
     Assert-Equal 'Info' (Get-ConsoleLineLevel -Line 'Ergebnis: 1 Fehler' -ExitCode 1 -ExitCodeChecked)
     Assert-Equal 'Info' (Get-ConsoleLineLevel -Line 'alles gut' -ExitCode 0)
 }
+Test-Case 'Fertig (7.12.6): Hinweis auf die Ersteinrichtung nur mit Route GET /system/einrichtung (Vorlage ab v2.11)' {
+    $pd = Join-Path $tmp 'setup-hint'; New-Item -ItemType Directory -Path (Join-Path $pd 'config') -Force | Out-Null
+    Assert-Equal '' (Get-SetupHint -ProgDir $pd -Url 'https://auftrag.example.de/') 'ohne routes.php'
+    [System.IO.File]::WriteAllText((Join-Path $pd 'config/routes.php'), "<?php`nreturn [`n    'GET /system/einstellungen' => [X::class, 'y', 'settings.manage'],`n];")
+    Assert-Equal '' (Get-SetupHint -ProgDir $pd -Url 'https://auftrag.example.de/') 'Vorlage vor v2.11'
+    [System.IO.File]::WriteAllText((Join-Path $pd 'config/routes.php'), "<?php`nreturn [`n    'GET /system/einrichtung' => [App\Controller\SetupController::class, 'index', 'settings.manage'],`n];")
+    $h = Get-SetupHint -ProgDir $pd -Url 'https://auftrag.example.de/'
+    Assert ($h -match '^Naechster Schritt: ' -and $h.Contains('System -> Einstellungen -> Ersteinrichtung') -and $h.Contains('(Adresse: https://auftrag.example.de/system/einrichtung)')) $h
+    Assert ((Get-SetupHint -ProgDir $pd -Url 'http://localhost:21110').Contains('http://localhost:21110/system/einrichtung')) 'ohne Schraegstrich'
+    Assert-Equal '' (Get-SetupHint -ProgDir $pd -Url '') 'ohne Adresse'
+    Assert ($h -cmatch '^[\x20-\x7E]+$') "nur ASCII: $h"
+    if (Test-Path -LiteralPath (Join-Path $Vorlage 'config/routes.php')) {
+        $has = ([System.IO.File]::ReadAllText((Join-Path $Vorlage 'config/routes.php'))).Contains("'GET /system/einrichtung'")
+        Assert-Equal $has ([bool](Get-SetupHint -ProgDir $Vorlage -Url 'https://x.test/')) 'routes.php der Vorlage'
+    }
+    $sf = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Initialize-FinishPage' }, $true)
+    Assert ($sf -and $sf.Extent.Text -match 'if \(\$r\.Success\)[\s\S]{0,200}Get-SetupHint') 'nur nach erfolgreichem Lauf'
+}
 Test-Case 'Pruefen (7.12.4): Knopf je Modus, vorhandene Installation vor dem Pruefen frisch lesen' {
     Assert-Equal 'Installieren' (Get-RunVerb -Mode 'install')
     Assert-Equal 'Wiederholen' (Get-RunVerb -Mode 'repeat')
