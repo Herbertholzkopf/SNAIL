@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.5
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.6
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12.5'
+$script:AppVersion = '7.12.6'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -5755,6 +5755,22 @@ function Get-ConfigAutoKeysNote {
     return ('Neue Konfigurationsschluessel ergaenzt SNAIL nicht (Ausnahme: {0}, falls sie fehlen, dazu CONFIG_VERSION eine Stufe hoeher, wenn danach keiner fehlt) - die Anwendung laeuft mit Standardwerten weiter; Hinweise von check stehen unten ("config.php oeffnen").' -f $list)
 }
 
+<#
+ Hinweis auf "Fertig": Ersteinrichtung im Programm (Vorlage ab v2.11, Route
+ 'GET /system/einrichtung', Recht settings.manage). Nur wenn die Route in
+ config\routes.php des Programms steht - aeltere Staende: ''. Adresse aus der
+ url des Programms (app.url = url in der services.json).
+#>
+function Get-SetupHint {
+    param([string]$ProgDir, [string]$Url)
+    if (-not $ProgDir -or -not $Url) { return '' }
+    $routes = Join-Path (Join-Path $ProgDir 'config') 'routes.php'
+    if (-not (Test-Path -LiteralPath $routes -PathType Leaf)) { return '' }
+    if ([System.IO.File]::ReadAllText($routes) -notmatch "['""]GET\s+/system/einrichtung['""]") { return '' }
+    $addr = $Url.TrimEnd('/') + '/system/einrichtung'
+    return ("Naechster Schritt: Melden Sie sich als Administrator an und oeffnen Sie System -> Einstellungen -> Ersteinrichtung (Adresse: {0}) - dort richten Sie Firma, Logo, KI und Mail Schritt fuer Schritt ein." -f $addr)
+}
+
 function Get-FinishAccess {
     param([Parameter(Mandatory)]$Result)
     $r = $Result
@@ -5897,6 +5913,10 @@ function Initialize-FinishPage {
     $y = Show-FinishSecrets -Secrets $acc.Secrets -Top $y
 
     $notiz = New-Object System.Collections.Generic.List[string]
+    if ($r.Success) {
+        $setup = Get-SetupHint -ProgDir $plan.ProgDir -Url $(if ($r.Url) { [string]$r.Url } else { [string]$r.Local })
+        if ($setup) { $notiz.Add($setup) }
+    }
     if ($plan.Mode -ne 'update') { $notiz.Add($(if ($r.ConfigNew) { 'config.php wurde erzeugt.' } else { 'Die vorhandene config.php wurde übernommen.' })) }
     if ($plan.Mode -eq 'update') { $notiz.Add((Get-ConfigAutoKeysNote)) }
     if ($ak.Backup) { $notiz.Add('Die Kopie der vorherigen config.php ist nur für Administratoren lesbar; SNAIL löscht sie nicht automatisch.') }

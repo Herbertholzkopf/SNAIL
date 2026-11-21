@@ -6,7 +6,7 @@ Ein grafischer Assistent für Windows Server, der Anwendungen auf Basis der **pr
 
 Den Server richtet vorher **[WIPP](../WIPP)** ein (IIS, PHP, PostgreSQL, pgAdmin, optional Python). SNAIL liest dessen Schnittstellendateien unter `C:\ProgramData\WIPP` und funktioniert ohne sie auch auf einem anders eingerichteten Server. Der Vertrag zwischen SNAIL und den Anwendungen steht in der projektvorlage unter `docs/03-installation-betrieb.md`.
 
-Aktueller Stand: **SNAIL 7.12.5**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
+Aktueller Stand: **SNAIL 7.12.6**. SNAIL 7 ist nur für die projektvorlage (PostgreSQL, `config.php`); MySQL und `.env` gibt es nicht mehr. Entfernen von Installationen gehört bewusst nicht zum Umfang.
 
 ## Katalog und Server
 
@@ -73,6 +73,10 @@ Ordner/Site/App-Pool, Programmordner, Datenbank und Windows-Aufgabe werden daneb
 | Prüfskript | `tools\windows-pruefung.ps1 -Url http://localhost:<port>` unter **Windows PowerShell 5.1**, Bericht nach `C:\ProgramData\SNAIL\pruefberichte\` | ebenso |
 
 `app.key` nachtragen, `services.json`, Windows-Aufgabe und Prüfskript halten die Installation nicht an: Scheitern sie, steht der Grund auf „Fertig“. Alle anderen Schritte bauen aufeinander auf und brechen bei einem Fehler ab. **Neue Konfigurationsschlüssel** nach einem Update ergänzt SNAIL nicht selbst (Ausnahme: `app.key`, `app.key_previous`, `mail.redirect_to`, siehe [app.key](#appkey)) – die Anwendung läuft mit Standardwerten weiter (Vorlage, `docs/04`), `check` nennt sie, „Fertig“ bietet „config.php öffnen“.
+
+### Fertig: Hinweis auf die Ersteinrichtung
+
+Seit 7.12.6 steht nach einem erfolgreichen Lauf (Neuinstallation, Wiederholen, Aktualisieren) unter den Zugangsdaten: „Naechster Schritt: Melden Sie sich als Administrator an und oeffnen Sie System -> Einstellungen -> Ersteinrichtung (Adresse: `<Programm-URL>/system/einrichtung`) …“ – nur wenn das Programm die Route hat (`'GET /system/einrichtung'` in `config\routes.php`, Vorlage ab v2.11); ältere Stände bekommen keinen Hinweis. Die Adresse ist die `url` des Programms (`app.url`, so auch in der `services.json`). Kein neuer Schlüssel, keine neue Konsolenausgabe.
 
 ## Namen und Ordner
 
