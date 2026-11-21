@@ -1,6 +1,6 @@
 ﻿<#
 ================================================================================
- SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.6
+ SNAIL - Simple New-project Automation & Installation Launcher  -  Version 7.12.7
 ================================================================================
  Installiert und aktualisiert Anwendungen auf Basis der "projektvorlage"
  (PHP 8.5+, IIS, PostgreSQL 18, config.php) auf einem Windows Server, der vorher
@@ -140,7 +140,7 @@ if (-not $NoRelaunch) {
 # ==============================================================================
 
 $script:AppTitle   = 'SNAIL'
-$script:AppVersion = '7.12.6'
+$script:AppVersion = '7.12.7'
 $script:FormatVersion = 1        # Format des Katalogs, der services.json und der WIPP-Dateien
 
 $script:JsonPath   = Join-Path $script:SelfDir 'projekte.json'
@@ -4389,10 +4389,15 @@ function Test-Installation {
     $dp = Get-DmsPlan -Target $inst -Instances @($script:Instances) -TemplateKnowsAuth $knowsAuth -Catalog @($script:ServiceList)
     $plan.DmsRole = $dp.Role; $plan.Dms = $dp.Dms
     foreach ($h in $dp.Hints) { & $add $h.Level 'Anmeldung' $h.Text }
-    if ($dp.Role -eq 'dms' -and $isNew -and $inst.Admin) {
-        # Notfallkonto nicht wie ein DMS-Benutzer nennen (Vertrag A5, Punkt 5)
-        if ($inst.Admin.Login -ne 'notfall') { & $add 'Info' 'Notfallkonto' ("Lokales Notfallkonto 'notfall' statt '{0}' (Anmeldung unter /login/notfall)." -f $inst.Admin.Login) }
-        $inst.Admin.Login = 'notfall'
+    if ($inst.Admin) {
+        # Notfallkonto nicht wie ein DMS-Benutzer nennen (Vertrag A5, Punkt 5) - fuer
+        # JEDES Konto, das SNAIL im Modus dms neu anlegt: Neuinstallation und auch
+        # Wiederholen mit neu angelegter bzw. leerer Datenbank (7.12.7; vorher nur
+        # bei Neuinstallation -> Konto "admin", Konflikt mit dem werner-Admin).
+        # Vorhandene Konten benennt SNAIL nie um (Schritt admin legt nur bei 0 Konten an).
+        $login = Get-AdminLogin -Role $dp.Role -Login $inst.Admin.Login
+        if ($isNew -and $login -ne $inst.Admin.Login) { & $add 'Info' 'Notfallkonto' ("Lokales Notfallkonto 'notfall' statt '{0}' (Anmeldung unter /login/notfall)." -f $inst.Admin.Login) }
+        $inst.Admin.Login = $login
     }
     $audioMb = Get-PlanAudioMaxMb -Plan $plan
     $reqMin = [int]$inst.Service.RequestMinMb
@@ -4536,6 +4541,9 @@ function Test-Installation {
             else {
                 $txt = "{0} ({1}) / Rolle {2} ({3})" -f $plan.DbName, $(if ($s.DbExists) { 'vorhanden' } else { 'wird angelegt' }), $plan.DbUser, $(if ($s.RoleExists) { 'vorhanden' } else { 'wird angelegt' })
                 & $add 'Ok' 'Datenbank' $txt
+                if (-not $isNew -and -not $s.DbExists) {
+                    & $add 'Info' 'Administrator' ("Datenbank wird neu angelegt - SNAIL legt das lokale Konto '{0}' an{1}." -f $inst.Admin.Login, $(if ($plan.DmsRole -eq 'dms') { ' (Notfallkonto, Anmeldung unter /login/notfall; die Admins aus werner uebernimmt dms:admins-uebernehmen)' } else { '' }))
+                }
             }
         } catch { & $add 'Error' 'Datenbank' $_.Exception.Message }
     } else {
@@ -5769,6 +5777,13 @@ function Get-SetupHint {
     if ([System.IO.File]::ReadAllText($routes) -notmatch "['""]GET\s+/system/einrichtung['""]") { return '' }
     $addr = $Url.TrimEnd('/') + '/system/einrichtung'
     return ("Naechster Schritt: Melden Sie sich als Administrator an und oeffnen Sie System -> Einstellungen -> Ersteinrichtung (Adresse: {0}) - dort richten Sie Firma, Logo, KI und Mail Schritt fuer Schritt ein." -f $addr)
+}
+
+# Login des Administrators, den SNAIL neu anlegt: im Modus dms immer das Notfallkonto
+function Get-AdminLogin {
+    param([string]$Role, [string]$Login)
+    if ($Role -eq 'dms') { return 'notfall' }
+    return $Login
 }
 
 function Get-FinishAccess {
